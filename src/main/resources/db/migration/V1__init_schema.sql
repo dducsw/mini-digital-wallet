@@ -1,0 +1,1 @@
+-- V1 Initial Schema for mini-digital-wallet
