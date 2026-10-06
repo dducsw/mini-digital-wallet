@@ -28,6 +28,72 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
 
 ## 2. Danh Sách REST APIs
 
+### 2.0 Xác Thực & Người Dùng (Authentication & User)
+
+#### Đăng ký tài khoản (Register)
+- **Endpoint**: `POST /api/v1/auth/register`
+- **Mô tả**: Đăng ký người dùng mới, tự động băm mật khẩu bằng BCrypt, tự động khởi tạo ví USD mặc định, cấp phát JWT Access Token.
+- **Request Body**:
+  ```json
+  {
+    "username": "alice",
+    "email": "alice@example.com",
+    "password": "Password123!",
+    "full_name": "Alice Wonderland",
+    "currency": "USD"
+  }
+  ```
+- **Response (201 Created)**:
+  ```json
+  {
+    "accessToken": "eyJhbGciOiJIUzUxMiJ9...",
+    "tokenType": "Bearer",
+    "expiresIn": 86400,
+    "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "username": "alice",
+    "email": "alice@example.com",
+    "defaultWalletId": "5f425555-2f70-4d56-bc5e-828049fe93c6"
+  }
+  ```
+
+#### Đăng nhập (Login)
+- **Endpoint**: `POST /api/v1/auth/login`
+- **Mô tả**: Kiểm tra username/password, trả về JWT Access Token nếu hợp lệ.
+- **Request Body**:
+  ```json
+  {
+    "username": "alice",
+    "password": "Password123!"
+  }
+  ```
+- **Response (200 OK)**:
+  ```json
+  {
+    "accessToken": "eyJhbGciOiJIUzUxMiJ9...",
+    "tokenType": "Bearer",
+    "expiresIn": 86400,
+    "userId": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "username": "alice",
+    "email": "alice@example.com",
+    "defaultWalletId": "5f425555-2f70-4d56-bc5e-828049fe93c6"
+  }
+  ```
+
+#### Lấy thông tin user hiện tại (Current User)
+- **Endpoint**: `GET /api/v1/auth/me`
+- **Header**: `Authorization: Bearer <accessToken>`
+- **Response (200 OK)**:
+  ```json
+  {
+    "id": "3fa85f64-5717-4562-b3fc-2c963f66afa6",
+    "username": "alice",
+    "email": "alice@example.com",
+    "fullName": "Alice Wonderland",
+    "status": "ACTIVE",
+    "createdAt": "2026-10-06T12:00:00Z"
+  }
+  ```
+
 ### 2.1 Quản Lý Phương Thức Thanh Toán / Thẻ Liên Kết (Payment Methods)
 
 #### Liên kết thẻ mới (Link Card / Bank)

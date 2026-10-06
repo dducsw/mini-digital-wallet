@@ -41,11 +41,16 @@ public class WalletController {
     @GetMapping
     public ResponseEntity<List<WalletResponse>> getWalletsByOwner(
         @RequestParam(name = "owner_id", required = false) String ownerId,
-        @RequestParam(name = "user_id", required = false) String userId
+        @RequestParam(name = "user_id", required = false) String userId,
+        @org.springframework.security.core.annotation.AuthenticationPrincipal com.minidigitalwallet.security.UserPrincipal principal
     ) {
         String targetId = (ownerId != null && !ownerId.isBlank()) ? ownerId : userId;
         if (targetId == null || targetId.isBlank()) {
-            return ResponseEntity.badRequest().build();
+            if (principal != null) {
+                targetId = principal.getId().toString();
+            } else {
+                return ResponseEntity.badRequest().build();
+            }
         }
         List<WalletResponse> responses = walletService.getWalletsByUserId(targetId);
         return ResponseEntity.ok(responses);
