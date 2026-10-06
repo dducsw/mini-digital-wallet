@@ -1,0 +1,187 @@
+package com.minidigitalwallet.service;
+
+import com.minidigitalwallet.dto.request.TopUpRequest;
+import com.minidigitalwallet.dto.request.TransferRequest;
+import com.minidigitalwallet.dto.request.WithdrawRequest;
+import com.minidigitalwallet.dto.response.TransferResponse;
+import com.minidigitalwallet.entity.LedgerTransaction;
+import com.minidigitalwallet.entity.PaymentMethod;
+import com.minidigitalwallet.entity.Wallet;
+import com.minidigitalwallet.entity.enums.PaymentMethodStatus;
+import com.minidigitalwallet.entity.enums.TransactionType;
+import com.minidigitalwallet.entity.enums.WalletStatus;
+import com.minidigitalwallet.entity.enums.WalletType;
+import com.minidigitalwallet.exception.AppException;
+import com.minidigitalwallet.repository.PaymentMethodRepository;
+import com.minidigitalwallet.service.impl.TransferServiceImpl;
+import org.junit.jupiter.api.BeforeEach;
+import org.junit.jupiter.api.DisplayName;
+import org.junit.jupiter.api.Test;
+import org.junit.jupiter.api.extension.ExtendWith;
+import org.mockito.InjectMocks;
+import org.mockito.Mock;
+import org.mockito.junit.jupiter.MockitoExtension;
+
+import java.time.Instant;
+import java.util.Optional;
+import java.util.UUID;
+
+import static org.assertj.core.api.Assertions.assertThat;
+import static org.assertj.core.api.Assertions.assertThatThrownBy;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.*;
+
+@ExtendWith(MockitoExtension.class)
+class TransferServiceTest {
+
+    @Mock
+    private LedgerFacade ledgerFacade;
+
+    @Mock
+    private WalletService walletService;
+
+    @Mock
+    private PaymentMethodRepository paymentMethodRepository;
+
+    @InjectMocks
+    private TransferServiceImpl transferService;
+
+    private Wallet userWallet;
+    private PaymentMethod userCard;
+
+    @BeforeEach
+    void setUp() {
+        userWallet = Wallet.builder()
+            .id(UUID.fromString("aaaaaaaa-aaaa-aaaa-aaaa-aaaaaaaaaaaa"))
+            .userId("USR_001")
+            .walletType(WalletType.USER)
+            .currency("USD")
+            .availableBalance(5000L)
+            .ledgerBalance(5000L)
+            .status(WalletStatus.ACTIVE)
+            .build();
+
+        userCard = PaymentMethod.builder()
+            .id(UUID.fromString("cccccccc-cccc-cccc-cccc-cccccccccccc"))
+            .ownerId("USR_001")
+            .maskedNumber("**** 4242")
+            .status(PaymentMethodStatus.ACTIVE)
+            .build();
+    }
+
+    @Test
+    @DisplayName("topUp: Successfully deposits funds from external settlement to user wallet")
+    void topUp_Success() {
+        TopUpRequest request = new TopUpRequest(userWallet.getId(), userCard.getId(), 2000L, "Topup test");
+
+        LedgerTransaction mockTx = LedgerTransaction.builder()
+            .id(UUID.randomUUID())
+            .referenceId("TOPUP-123")
+            .transactionType(TransactionType.TOPUP)
+            .amount(2000L)
+            .currency("USD")
+            .createdAt(Instant.now())
+            .build();
+
+        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
+        when(paymentMethodRepository.findByIdAndStatus(userCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(userCard));
+        when(ledgerFacade.executeTransferWithRetry(
+            any(),
+            eq(TransferService.SYS_EXTERNAL_SETTLEMENT_ID),
+            eq(userWallet.getId()),
+            eq(2000L),
+            eq(TransactionType.TOPUP),
+            any()
+        )).thenReturn(mockTx);
+
+        TransferResponse response = transferService.topUp(request, "IDEM-TOPUP-1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.amount()).isEqualTo(2000L);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.TOPUP);
+    }
+
+    @Test
+    @DisplayName("topUp: Payment method of another user throws 403 Forbidden")
+    void topUp_UnauthorizedCard_ThrowsForbidden() {
+        PaymentMethod otherCard = PaymentMethod.builder()
+            .id(UUID.fromString("dddddddd-dddd-dddd-dddd-dddddddddddd"))
+            .ownerId("HACKER_USER")
+            .maskedNumber("**** 9999")
+            .status(PaymentMethodStatus.ACTIVE)
+            .build();
+
+        TopUpRequest request = new TopUpRequest(userWallet.getId(), otherCard.getId(), 2000L, "Hacked topup");
+
+        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
+        when(paymentMethodRepository.findByIdAndStatus(otherCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(otherCard));
+
+        assertThatThrownBy(() -> transferService.topUp(request, "IDEM-HACK"))
+            .isInstanceOf(AppException.class)
+            .hasMessageContaining("Payment method does not belong to the wallet owner");
+    }
+
+    @Test
+    @DisplayName("withdraw: Successfully withdraws funds from user wallet to external settlement")
+    void withdraw_Success() {
+        WithdrawRequest request = new WithdrawRequest(userWallet.getId(), userCard.getId(), 1500L, "Withdraw test");
+
+        LedgerTransaction mockTx = LedgerTransaction.builder()
+            .id(UUID.randomUUID())
+            .referenceId("WITHDRAW-123")
+            .transactionType(TransactionType.WITHDRAW)
+            .amount(1500L)
+            .currency("USD")
+            .createdAt(Instant.now())
+            .build();
+
+        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
+        when(paymentMethodRepository.findByIdAndStatus(userCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(userCard));
+        when(ledgerFacade.executeTransferWithRetry(
+            any(),
+            eq(userWallet.getId()),
+            eq(TransferService.SYS_EXTERNAL_SETTLEMENT_ID),
+            eq(1500L),
+            eq(TransactionType.WITHDRAW),
+            any()
+        )).thenReturn(mockTx);
+
+        TransferResponse response = transferService.withdraw(request, "IDEM-WITHDRAW-1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.amount()).isEqualTo(1500L);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.WITHDRAW);
+    }
+
+    @Test
+    @DisplayName("transfer: Successfully initiates P2P transfer between two wallets")
+    void transfer_Success() {
+        UUID destWalletId = UUID.fromString("bbbbbbbb-bbbb-bbbb-bbbb-bbbbbbbbbbbb");
+        TransferRequest request = new TransferRequest(userWallet.getId(), destWalletId, 1000L, "P2P test");
+
+        LedgerTransaction mockTx = LedgerTransaction.builder()
+            .id(UUID.randomUUID())
+            .referenceId("P2P-123")
+            .transactionType(TransactionType.P2P_TRANSFER)
+            .amount(1000L)
+            .currency("USD")
+            .createdAt(Instant.now())
+            .build();
+
+        when(ledgerFacade.executeTransferWithRetry(
+            any(),
+            eq(userWallet.getId()),
+            eq(destWalletId),
+            eq(1000L),
+            eq(TransactionType.P2P_TRANSFER),
+            any()
+        )).thenReturn(mockTx);
+
+        TransferResponse response = transferService.transfer(request, "IDEM-P2P-1");
+
+        assertThat(response).isNotNull();
+        assertThat(response.amount()).isEqualTo(1000L);
+        assertThat(response.transactionType()).isEqualTo(TransactionType.P2P_TRANSFER);
+    }
+}
