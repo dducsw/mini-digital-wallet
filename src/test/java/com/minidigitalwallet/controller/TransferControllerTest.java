@@ -47,6 +47,15 @@ class TransferControllerTest {
     @MockBean
     private TransferService transferService;
 
+    @MockBean
+    private com.minidigitalwallet.service.IdempotencyService idempotencyService;
+
+    @org.junit.jupiter.api.BeforeEach
+    void setUp() {
+        when(idempotencyService.execute(any(), any(), any(), any(), any(), any()))
+            .thenAnswer(inv -> ((java.util.function.Supplier<?>) inv.getArgument(5)).get());
+    }
+
     @Test
     @DisplayName("POST /api/v1/transfers/topup returns 201 Created")
     void topUp_ReturnsCreated() throws Exception {

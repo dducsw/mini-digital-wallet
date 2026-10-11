@@ -18,4 +18,10 @@ public interface PaymentMethodService {
     void revokePaymentMethod(UUID id);
 
     PaymentMethod getPaymentMethodEntity(UUID id);
+
+    /**
+     * DIP boundary: resolves an ACTIVE card and guarantees it belongs to the
+     * given wallet owner. TransferService must not query payment tables directly.
+     */
+    PaymentMethod requireOwnedCard(UUID cardId, String walletOwnerId);
 }

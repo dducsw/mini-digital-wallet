@@ -16,6 +16,17 @@ public interface LedgerService {
         String description
     );
 
+    /**
+     * Append-only reversal: creates a new REVERSAL transaction with mirrored
+     * entries (credit back the original source, debit the original destination).
+     * Never updates or deletes the original transaction.
+     */
+    LedgerTransaction reverseTransfer(
+        UUID originalTransactionId,
+        String reversalReferenceId,
+        String description
+    );
+
     LedgerTransaction getTransaction(UUID transactionId);
 
     LedgerTransaction getTransactionByReferenceId(String referenceId);

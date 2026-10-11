@@ -12,7 +12,6 @@ import com.minidigitalwallet.entity.enums.TransactionType;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
 import com.minidigitalwallet.exception.AppException;
-import com.minidigitalwallet.repository.PaymentMethodRepository;
 import com.minidigitalwallet.service.impl.TransferServiceImpl;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
@@ -23,7 +22,6 @@ import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
 import java.time.Instant;
-import java.util.Optional;
 import java.util.UUID;
 
 import static org.assertj.core.api.Assertions.assertThat;
@@ -42,7 +40,7 @@ class TransferServiceTest {
     private WalletService walletService;
 
     @Mock
-    private PaymentMethodRepository paymentMethodRepository;
+    private PaymentMethodService paymentMethodService;
 
     @InjectMocks
     private TransferServiceImpl transferService;
@@ -68,6 +66,8 @@ class TransferServiceTest {
             .maskedNumber("**** 4242")
             .status(PaymentMethodStatus.ACTIVE)
             .build();
+
+        transferService = new TransferServiceImpl(ledgerFacade, walletService, paymentMethodService);
     }
 
     @Test
@@ -84,8 +84,8 @@ class TransferServiceTest {
             .createdAt(Instant.now())
             .build();
 
-        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
-        when(paymentMethodRepository.findByIdAndStatus(userCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(userCard));
+        when(walletService.getWalletOwnerId(userWallet.getId())).thenReturn("USR_001");
+        when(paymentMethodService.requireOwnedCard(userCard.getId(), "USR_001")).thenReturn(userCard);
         when(ledgerFacade.executeTransferWithRetry(
             any(),
             eq(TransferService.SYS_EXTERNAL_SETTLEMENT_ID),
@@ -114,8 +114,10 @@ class TransferServiceTest {
 
         TopUpRequest request = new TopUpRequest(userWallet.getId(), otherCard.getId(), 2000L, "Hacked topup");
 
-        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
-        when(paymentMethodRepository.findByIdAndStatus(otherCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(otherCard));
+        when(walletService.getWalletOwnerId(userWallet.getId())).thenReturn("USR_001");
+        when(paymentMethodService.requireOwnedCard(otherCard.getId(), "USR_001"))
+            .thenThrow(new AppException("Payment method does not belong to the wallet owner",
+                org.springframework.http.HttpStatus.FORBIDDEN, "payment-method-forbidden"));
 
         assertThatThrownBy(() -> transferService.topUp(request, "IDEM-HACK"))
             .isInstanceOf(AppException.class)
@@ -136,8 +138,8 @@ class TransferServiceTest {
             .createdAt(Instant.now())
             .build();
 
-        when(walletService.getWalletEntity(userWallet.getId())).thenReturn(userWallet);
-        when(paymentMethodRepository.findByIdAndStatus(userCard.getId(), PaymentMethodStatus.ACTIVE)).thenReturn(Optional.of(userCard));
+        when(walletService.getWalletOwnerId(userWallet.getId())).thenReturn("USR_001");
+        when(paymentMethodService.requireOwnedCard(userCard.getId(), "USR_001")).thenReturn(userCard);
         when(ledgerFacade.executeTransferWithRetry(
             any(),
             eq(userWallet.getId()),

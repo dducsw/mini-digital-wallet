@@ -11,91 +11,53 @@ Cần cài đặt các công cụ sau trên máy:
 | Công cụ                            | Phiên bản yêu cầu                  | Lệnh kiểm tra            |
 | :----------------------------------- | :------------------------------------- | :------------------------- |
 | **Java Development Kit (JDK)** | Java 21 (Eclipse Temurin / OpenJDK 21) | `java -version`          |
-| **Apache Maven**               | 3.9+                                   | `mvn -version`           |
-| **Docker Engine & Compose**    | Docker v24+, Compose v2+               | `docker compose version` |
+| **Apache Maven**               | 3.9+ (hoặc dùng sẵn `mvnw` / `mvnw.cmd`) | `mvn -version`           |
+| **Docker Engine & Compose**    | Docker v24+, Compose v2+ (bắt buộc cho test đồng thời Testcontainers) | `docker compose version` |
 | **Git**                        | 2.40+                                  | `git --version`          |
-| **grpcurl (Tùy chọn)**       | 1.8+ (Để test gRPC qua CLI)          | `grpcurl --version`      |
 
 ---
 
-## 2. Khởi Tạo Dự Án (Project Initialization)
+## 2. Cấu Trúc Dự Án Thực Tế (Package-by-Layer)
 
-Bạn có thể chọn 1 trong 2 cách sau để bắt đầu:
+```
+src/main/java/com/minidigitalwallet/
+├── controller/      # REST: Auth, Wallet, PaymentMethod, Transfer, Ledger
+├── service/         # Interface nghiệp vụ + LedgerFacade (@Retryable)
+│   └── impl/        # WalletServiceImpl, TransferServiceImpl, LedgerServiceImpl, ...
+├── repository/      # Spring Data JPA (Wallet, Ledger*, PaymentMethod, User)
+├── entity/          # Wallet, LedgerTransaction, LedgerEntry, PaymentMethod, User
+│   └── enums/       # WalletStatus/Type, TransactionType, EntryType, ...
+├── dto/request/     # CreateWalletRequest, TopUp/Withdraw/Transfer/ReversalRequest, ...
+├── dto/response/    # WalletResponse, TransferResponse, LedgerTransactionResponse, ...
+├── exception/       # AppException + GlobalExceptionHandler (RFC 7807)
+└── security/        # JWT: SecurityConfig, JwtTokenProvider, JwtAuthenticationFilter, ...
 
-### Cách 1: Khởi tạo Tự động qua Spring Initializr CLI (Khuyên Dùng)
-
-Sử dụng lệnh `curl` gửi yêu cầu đến máy chủ Spring Initializr chính thức để tự động sinh toàn bộ cấu trúc thư mục, `pom.xml`, và Maven wrapper `mvnw`:
-
-#### Trên Windows (PowerShell):
-
-```powershell
-curl.exe -L "https://start.spring.io/starter.zip?type=maven-project&language=java&javaVersion=21&groupId=com.minidigitalwallet&artifactId=mini-digital-wallet&name=mini-digital-wallet&packageName=com.minidigitalwallet&dependencies=web,data-jpa,data-redis,validation,actuator,postgresql,flyway,lombok" -o mini-digital-wallet.zip
-
-# Giải nén dự án vào thư mục hiện tại:
-Expand-Archive -Path mini-digital-wallet.zip -DestinationPath . -Force
-Remove-Item mini-digital-wallet.zip
+src/main/resources/db/migration/
+├── V1__init_schema.sql        # wallets + payment_methods + 3 ví SYSTEM
+├── V2__init_ledger.sql        # ledger_transactions + ledger_entries
+├── V3__init_users.sql         # users (auth)
+└── V4__ledger_entry_line_no.sql  # line_no + UNIQUE(transaction_id, line_no)
 ```
 
-#### Trên Linux / macOS (Bash):
-
-```bash
-curl https://start.spring.io/starter.zip \
-  -d type=maven-project \
-  -d language=java \
-  -d bootVersion=3.3.2 \
-  -d javaVersion=21 \
-  -d groupId=com.minidigitalwallet \
-  -d artifactId=mini-digital-wallet \
-  -d name=mini-digital-wallet \
-  -d packageName=com.minidigitalwallet \
-  -d dependencies=web,data-jpa,data-redis,validation,actuator,postgresql,flyway,lombok \
-  -o mini-digital-wallet.zip
-
-# Giải nén dự án:
-unzip -o mini-digital-wallet.zip -d .
-rm mini-digital-wallet.zip
-```
-
-> **Lưu ý sau khi giải nén**: Cần bổ sung các dependency gRPC và `protobuf-maven-plugin` vào file `pom.xml` (xem chi tiết ở mục 3.1 bên dưới) và tạo thêm thư mục `src/main/proto`.
-
----
-
-### Cách 2: Khởi tạo Thủ công Cây Thư mục (Manual Scaffolding)
-
-Nếu muốn tự tay dựng từng thư mục theo chuẩn Clean Architecture:
-
-#### Trên Windows (PowerShell):
-
-```powershell
-New-Item -ItemType Directory -Force -Path `
-  "src/main/proto", `
-  "src/main/resources/db/migration", `
-  "src/main/java/com/minidigitalwallet/config", `
-  "src/main/java/com/minidigitalwallet/domain/model", `
-  "src/main/java/com/minidigitalwallet/domain/exception", `
-  "src/main/java/com/minidigitalwallet/repository", `
-  "src/main/java/com/minidigitalwallet/service/impl", `
-  "src/main/java/com/minidigitalwallet/transport/rest/dto", `
-  "src/main/java/com/minidigitalwallet/transport/grpc", `
-  "src/test/java/com/minidigitalwallet"
-```
-
-#### Trên Linux / macOS (Bash):
-
-```bash
-mkdir -p src/main/proto \
-  src/main/resources/db/migration \
-  src/main/java/com/minidigitalwallet/{config,domain/model,domain/exception,repository,service/impl,transport/rest/dto,transport/grpc} \
-  src/test/java/com/minidigitalwallet
-```
+> Các shell trống Phase 3–5 (idempotency/outbox/reconciliation/Kafka/gRPC/Redis) đã bị xóa khỏi code để giữ service tối giản; đặc tả các phase đó vẫn nằm trong `PLAN.md`.
 
 ---
 
 ## 3. Tạo Các File Cấu Hình Cốt Lõi
 
-### 3.1 File `pom.xml` Chuẩn Đầy Đủ (Đã kèm gRPC & Protobuf Plugin)
+### 3.1 File `pom.xml` (tóm tắt — xem file thực tế ở thư mục gốc)
 
-Tạo file `pom.xml` tại thư mục gốc:
+| Nhóm | Artifact |
+| :--- | :--- |
+| Web/API | `spring-boot-starter-web`, `validation`, `actuator`, `security`, `jjwt-*` (0.12.6) |
+| Dữ liệu | `spring-boot-starter-data-jpa`, `postgresql` (runtime), `flyway-core` + `flyway-database-postgresql` |
+| Concurrency | `spring-retry` + `spring-boot-starter-aop` (cho `@Retryable` ở `LedgerFacade`) |
+| Test | `spring-boot-starter-test`, `security-test`, `h2` (unit test), `testcontainers` `junit-jupiter` + `postgresql` (test đồng thời + migration) |
+
+> Đã loại bỏ so với bản thiết kế cũ: `spring-boot-starter-data-redis`, `spring-kafka`, gRPC/protobuf — không có code nào dùng tới. Thêm lại khi làm Phase 3–4.
+
+<details>
+<summary>Bản thiết kế cũ (tham khảo, đã lỗi thời)</summary>
 
 ```xml
 <?xml version="1.0" encoding="UTF-8"?>
@@ -119,13 +81,11 @@ Tạo file `pom.xml` tại thư mục gốc:
 
     <properties>
         <java.version>21</java.version>
-        <grpc.version>1.65.1</grpc.version>
-        <protobuf.version>3.25.3</protobuf.version>
-        <grpc-spring-boot.version>3.1.0.RELEASE</grpc-spring-boot.version>
-        <os-maven-plugin.version>1.7.1</os-maven-plugin.version>
-        <protobuf-maven-plugin.version>0.6.1</protobuf-maven-plugin.version>
     </properties>
 
+    <!-- Xem pom.xml thực tế ở thư mục gốc để có danh sách đầy đủ.
+         Đoạn XML dưới đây chỉ còn giá trị lịch sử. -->
+    <!--
     <dependencies>
         <!-- Spring Boot Starters -->
         <dependency>
@@ -164,7 +124,8 @@ Tạo file `pom.xml` tại thư mục gốc:
             <artifactId>flyway-database-postgresql</artifactId>
         </dependency>
 
-        <!-- gRPC & Protobuf -->
+        <!-- gRPC & Protobuf: ĐÃ LOẠI BỎ (không có code nào dùng).
+             Giữ lại đoạn dưới để tham khảo khi cần bổ sung ở phase sau.
         <dependency>
             <groupId>net.devh</groupId>
             <artifactId>grpc-server-spring-boot-starter</artifactId>
@@ -184,6 +145,7 @@ Tạo file `pom.xml` tại thư mục gốc:
             <groupId>jakarta.annotation</groupId>
             <artifactId>jakarta.annotation-api</artifactId>
         </dependency>
+        -->
 
         <!-- Developer Tools -->
         <dependency>
@@ -221,7 +183,7 @@ Tạo file `pom.xml` tại thư mục gốc:
                     </excludes>
                 </configuration>
             </plugin>
-            <!-- Tự động sinh Java code từ file Protobuf khi chạy mvn compile -->
+            <!-- Tự động sinh Java code từ file Protobuf khi chạy mvn compile (ĐÃ LOẠI BỎ)
             <plugin>
                 <groupId>org.xolstice.maven.plugins</groupId>
                 <artifactId>protobuf-maven-plugin</artifactId>
@@ -240,16 +202,36 @@ Tạo file `pom.xml` tại thư mục gốc:
                     </execution>
                 </executions>
             </plugin>
+            -->
         </plugins>
     </build>
 </project>
 ```
+</details>
 
 ---
 
-### 3.2 Tạo File `docker-compose.yml`
+### 3.2 File `docker-compose.yml` (thực tế — chỉ còn PostgreSQL 16)
 
-Tạo file `docker-compose.yml` tại thư mục gốc để khởi chạy PostgreSQL 16 và Redis 7:
+```yaml
+services:
+  postgres:
+    image: postgres:16-alpine
+    container_name: wallet-postgres
+    environment:
+      POSTGRES_DB: wallet_db
+      POSTGRES_USER: postgres
+      POSTGRES_PASSWORD: postgrespassword
+    ports:
+      - "5436:5432"   # host 5436 để tránh đụng Postgres local
+    volumes:
+      - pgdata:/var/lib/postgresql/data
+```
+
+> Redis đã bỏ khỏi compose vì chưa có code nào dùng (sẽ thêm lại ở Phase 3 cho rate limiting).
+
+<details>
+<summary>Bản thiết kế cũ (tham khảo, đã lỗi thời)</summary>
 
 ```yaml
 version: '3.8'
@@ -257,7 +239,7 @@ version: '3.8'
 services:
   postgres:
     image: postgres:16-alpine
-    container_name: ledger-postgres
+    container_name: wallet-postgres
     environment:
       POSTGRES_DB: ledger_db
       POSTGRES_USER: postgres
@@ -276,6 +258,32 @@ services:
 volumes:
   pgdata:
 ```
+</details>
+
+---
+
+### 3.3 File `application.properties` (thực tế: `src/main/resources/application.properties`)
+
+```properties
+server.port=8080
+spring.datasource.url=${SPRING_DATASOURCE_URL:jdbc:postgresql://localhost:5436/wallet_db}
+spring.datasource.username=${SPRING_DATASOURCE_USERNAME:postgres}
+spring.datasource.password=${SPRING_DATASOURCE_PASSWORD:postgrespassword}
+spring.jpa.hibernate.ddl-auto=validate
+spring.jpa.open-in-view=false
+spring.flyway.enabled=${SPRING_FLYWAY_ENABLED:true}
+spring.flyway.baseline-on-migrate=true
+spring.flyway.locations=classpath:db/migration
+app.jwt.secret=...
+app.jwt.expiration-ms=86400000
+```
+
+Test dùng H2 in-memory cho unit test (`src/test/resources/application.properties`, `ddl-auto=create-drop`, Flyway tắt); riêng `LedgerConcurrencyTest`, `DoubleEntryInvariantTest`, `FlywayMigrationTest` dùng Testcontainers PostgreSQL 16 qua `@DynamicPropertySource` — yêu cầu Docker đang chạy.
+
+<details>
+<summary>Bản `application.yml` thiết kế cũ (tham khảo, đã lỗi thời)</summary>
+
+```yaml
 
 ---
 
@@ -332,6 +340,7 @@ management:
       exposure:
         include: health,info,metrics
 ```
+</details>
 
 ---
 
@@ -340,10 +349,10 @@ management:
 ### 4.1 Khởi động Hạ tầng Docker
 
 ```bash
-# Bật Postgres và Redis ở chế độ background
+# Bật Postgres ở chế độ background (Redis đã bỏ)
 docker compose up -d
 
-# Xem log kiểm tra các service đã sẵn sàng
+# Xem log kiểm tra service đã sẵn sàng
 docker compose logs -f
 
 # Kiểm tra trạng thái các container
@@ -357,21 +366,24 @@ docker compose down
 
 ### 4.2 Biên dịch & Build Dự Án Maven
 
+Dùng Maven Wrapper (`mvnw.cmd` trên Windows, `./mvnw` trên Linux/macOS):
+
 ```bash
 # 1. Dọn dẹp và tải toàn bộ dependencies
-mvn clean
+./mvnw clean
 
-# 2. Biên dịch code và tự động sinh gRPC stubs từ .proto
-mvn compile
+# 2. Biên dịch code
+./mvnw compile
 
-# 3. Đóng gói file JAR (Bỏ qua unit test khi cần build nhanh)
-mvn package -DskipTests
+# 3. Đóng gói file JAR (Bỏ qua test khi cần build nhanh)
+./mvnw package -DskipTests
 
-# 4. Chạy toàn bộ Unit Tests & Concurrency Tests
-mvn test
+# 4. Chạy toàn bộ test (55 test: unit H2 + đồng thời/integration Testcontainers)
+#    Yêu cầu Docker đang chạy cho LedgerConcurrencyTest, DoubleEntryInvariantTest, FlywayMigrationTest
+./mvnw test
 
-# 5. Chỉ chạy riêng Concurrency Stress Test
-mvn test -Dtest=LedgerConcurrencyTest
+# 5. Chỉ chạy riêng Concurrency Stress Test (PostgreSQL thật qua Testcontainers)
+./mvnw test -Dtest=LedgerConcurrencyTest
 ```
 
 ---
@@ -399,60 +411,38 @@ curl -X GET http://localhost:8080/actuator/health
 
 ---
 
-## 5. Test API qua CLI (cURL & grpcurl)
+## 5. Test API qua CLI (cURL)
 
-### 5.1 Test REST API (cURL)
-
-```bash
-# 1. Tạo tài khoản 1
-curl -X POST http://localhost:8080/api/v1/accounts \
-  -H "Content-Type: application/json" \
-  -d '{"owner_id": "USER_001", "currency": "USD", "daily_limit": 5000000}'
-
-# 2. Nạp $1,000 (100000 cents) vào tài khoản 1
-curl -X POST http://localhost:8080/api/v1/accounts/ACC_001/deposit \
-  -H "Content-Type: application/json" \
-  -d '{"reference_id": "DEP_001", "amount": 100000, "description": "Nap tien ban dau"}'
-
-# 3. Tạo tài khoản 2
-curl -X POST http://localhost:8080/api/v1/accounts \
-  -H "Content-Type: application/json" \
-  -d '{"owner_id": "USER_002", "currency": "USD", "daily_limit": 5000000}'
-
-# 4. Chuyển $250 (25000 cents) từ tài khoản 1 sang tài khoản 2
-curl -X POST http://localhost:8080/api/v1/transfers \
-  -H "Content-Type: application/json" \
-  -d '{
-    "reference_id": "TX_TEST_001",
-    "source_account_id": "ACC_001",
-    "target_account_id": "ACC_002",
-    "amount": 25000,
-    "currency": "USD",
-    "description": "Chuyen tien thu nghiem"
-  }'
-
-# 5. Xem sao kê tài khoản 1
-curl -X GET http://localhost:8080/api/v1/accounts/ACC_001/ledgers
-```
-
-### 5.2 Test gRPC qua `grpcurl` (Port 9090)
+> Chi tiết request/response xem `docs/API.md`. Ví dụ nhanh dưới đây (thay UUID ví/thẻ bằng giá trị thực tế):
 
 ```bash
-# Tra cứu danh sách RPC services
-grpcurl -plaintext localhost:9090 list
+# 1. Đăng ký user (tự tạo ví USD + trả JWT)
+curl -X POST http://localhost:8080/api/v1/auth/register \
+  -H "Content-Type: application/json" \
+  -d '{"username": "alice", "email": "alice@example.com", "password": "Password123!", "full_name": "Alice"}'
 
-# Gọi RPC GetAccount
-grpcurl -plaintext -d '{"account_id": "ACC_001"}' localhost:9090 com.minidigitalwallet.v1.LedgerService/GetAccount
+# 2. Liên kết thẻ (lưu với TOKEN, thay CARD_ID/WALLET_ID bên dưới)
+curl -X POST http://localhost:8080/api/v1/payment-methods \
+  -H "Content-Type: application/json" \
+  -d '{"owner_id": "alice", "method_type": "DEBIT_CARD", "provider": "VISA", "card_number": "4242424242424242", "holder_name": "ALICE"}'
 
-# Gọi RPC Transfer
-grpcurl -plaintext -d '{
-  "reference_id": "GRPC_TX_001",
-  "source_account_id": "ACC_001",
-  "target_account_id": "ACC_002",
-  "amount": 10000,
-  "currency": "USD",
-  "description": "gRPC transfer test"
-}' localhost:9090 com.minidigitalwallet.v1.LedgerService/Transfer
+# 3. Nạp $500 (50000 cents) vào ví
+curl -X POST http://localhost:8080/api/v1/transfers/topup \
+  -H "Content-Type: application/json" -H "Idempotency-Key: TOPUP-DEMO-001" \
+  -d '{"wallet_id": "WALLET_ID", "payment_method_id": "CARD_ID", "amount": 50000, "description": "Nap demo"}'
+
+# 4. Chuyển P2P $150 (15000 cents) sang ví khác
+curl -X POST http://localhost:8080/api/v1/transfers/p2p \
+  -H "Content-Type: application/json" -H "Idempotency-Key: P2P-DEMO-001" \
+  -d '{"source_wallet_id": "WALLET_ID_A", "destination_wallet_id": "WALLET_ID_B", "amount": 15000, "description": "Demo"}'
+
+# 5. Hoàn tiền giao dịch (đảo bút toán append-only)
+curl -X POST http://localhost:8080/api/v1/transfers/reversals \
+  -H "Content-Type: application/json" -H "Idempotency-Key: REV-DEMO-001" \
+  -d '{"original_transaction_id": "TX_ID", "description": "Hoan tien demo"}'
+
+# 6. Xem sao kê ví
+curl -X GET http://localhost:8080/api/v1/ledger/wallets/WALLET_ID/entries
 ```
 
 ---
@@ -461,7 +451,7 @@ grpcurl -plaintext -d '{
 
 | Vấn đề                                                  | Nguyên nhân                                            | Cách khắc phục                                                                                 |
 | :--------------------------------------------------------- | :------------------------------------------------------- | :------------------------------------------------------------------------------------------------ |
-| **Lỗi Port `5432` hoặc `6379` already in use** | Đã có PostgreSQL/Redis local đang chạy ngầm.       | Tắt service local hoặc đổi port trong`docker-compose.yml` (vd: `5433:5432`).              |
-| **Không tìm thấy stubs gRPC sau khi build**       | Maven chưa chạy sinh mã từ`.proto`.                | Chạy lệnh`mvn clean compile` hoặc kiểm tra thư mục `target/generated-sources/protobuf`. |
+| **Lỗi Port `5436` already in use** | Đã có service local chiếm port 5436.       | Đổi port trong`docker-compose.yml` (vd: `5437:5432`) và cập nhật `SPRING_DATASOURCE_URL`.              |
+| **Test Testcontainers báo Docker not found**       | Docker daemon chưa chạy.                | Khởi động Docker Desktop rồi chạy lại `./mvnw test`. |
 | **Lỗi Java 21 not found**                           | Phiên bản`JAVA_HOME` trỏ về JDK cũ (JDK 8/11/17). | Cài JDK 21 và thiết lập biến môi trường`JAVA_HOME` trỏ tới JDK 21.                    |
-| **Lỗi kết nối Redis / Postgres trong Docker**     | Container chưa khởi động xong.                       | Kiểm tra`docker compose ps`, xem log bằng `docker compose logs postgres`.                   |
+| **Lỗi kết nối Postgres trong Docker**     | Container chưa khởi động xong.                       | Kiểm tra`docker compose ps`, xem log bằng `docker compose logs postgres`.                   |

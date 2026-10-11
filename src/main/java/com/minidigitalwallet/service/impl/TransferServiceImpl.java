@@ -6,18 +6,13 @@ import com.minidigitalwallet.dto.request.WithdrawRequest;
 import com.minidigitalwallet.dto.response.TransferResponse;
 import com.minidigitalwallet.entity.LedgerTransaction;
 import com.minidigitalwallet.entity.PaymentMethod;
-import com.minidigitalwallet.entity.Wallet;
-import com.minidigitalwallet.entity.enums.PaymentMethodStatus;
 import com.minidigitalwallet.entity.enums.TransactionType;
-import com.minidigitalwallet.exception.AppException;
-import com.minidigitalwallet.exception.PaymentMethodNotFoundException;
-import com.minidigitalwallet.repository.PaymentMethodRepository;
 import com.minidigitalwallet.service.LedgerFacade;
+import com.minidigitalwallet.service.PaymentMethodService;
 import com.minidigitalwallet.service.TransferService;
 import com.minidigitalwallet.service.WalletService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
-import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 
 import java.util.UUID;
@@ -29,31 +24,17 @@ public class TransferServiceImpl implements TransferService {
 
     private final LedgerFacade ledgerFacade;
     private final WalletService walletService;
-    private final PaymentMethodRepository paymentMethodRepository;
+    private final PaymentMethodService paymentMethodService;
 
     @Override
     public TransferResponse topUp(TopUpRequest request, String idempotencyKey) {
-        Wallet wallet = walletService.getWalletEntity(request.walletId());
-
-        PaymentMethod card = paymentMethodRepository.findByIdAndStatus(request.paymentMethodId(), PaymentMethodStatus.ACTIVE)
-            .orElseThrow(() -> new PaymentMethodNotFoundException(request.paymentMethodId()));
-
-        if (!card.getOwnerId().equals(wallet.getUserId())) {
-            throw new AppException(
-                "Payment method does not belong to the wallet owner",
-                HttpStatus.FORBIDDEN,
-                "payment-method-forbidden"
-            );
-        }
-
-        String refId = idempotencyKey != null && !idempotencyKey.isBlank()
-            ? idempotencyKey
-            : "TOPUP-" + UUID.randomUUID();
+        String ownerId = walletService.getWalletOwnerId(request.walletId());
+        PaymentMethod card = paymentMethodService.requireOwnedCard(request.paymentMethodId(), ownerId);
 
         LedgerTransaction tx = ledgerFacade.executeTransferWithRetry(
-            refId,
+            referenceOr(idempotencyKey, "TOPUP"),
             SYS_EXTERNAL_SETTLEMENT_ID,
-            wallet.getId(),
+            request.walletId(),
             request.amount(),
             TransactionType.TOPUP,
             request.description() != null ? request.description() : "Top-up via card " + card.getMaskedNumber()
@@ -64,26 +45,12 @@ public class TransferServiceImpl implements TransferService {
 
     @Override
     public TransferResponse withdraw(WithdrawRequest request, String idempotencyKey) {
-        Wallet wallet = walletService.getWalletEntity(request.walletId());
-
-        PaymentMethod card = paymentMethodRepository.findByIdAndStatus(request.paymentMethodId(), PaymentMethodStatus.ACTIVE)
-            .orElseThrow(() -> new PaymentMethodNotFoundException(request.paymentMethodId()));
-
-        if (!card.getOwnerId().equals(wallet.getUserId())) {
-            throw new AppException(
-                "Payment method does not belong to the wallet owner",
-                HttpStatus.FORBIDDEN,
-                "payment-method-forbidden"
-            );
-        }
-
-        String refId = idempotencyKey != null && !idempotencyKey.isBlank()
-            ? idempotencyKey
-            : "WITHDRAW-" + UUID.randomUUID();
+        String ownerId = walletService.getWalletOwnerId(request.walletId());
+        PaymentMethod card = paymentMethodService.requireOwnedCard(request.paymentMethodId(), ownerId);
 
         LedgerTransaction tx = ledgerFacade.executeTransferWithRetry(
-            refId,
-            wallet.getId(),
+            referenceOr(idempotencyKey, "WITHDRAW"),
+            request.walletId(),
             SYS_EXTERNAL_SETTLEMENT_ID,
             request.amount(),
             TransactionType.WITHDRAW,
@@ -95,12 +62,9 @@ public class TransferServiceImpl implements TransferService {
 
     @Override
     public TransferResponse transfer(TransferRequest request, String idempotencyKey) {
-        String refId = idempotencyKey != null && !idempotencyKey.isBlank()
-            ? idempotencyKey
-            : "P2P-" + UUID.randomUUID();
-
+        // Ví không tồn tại -> LedgerService ném WalletNotFoundException khi lock, khỏi SELECT thừa ở đây.
         LedgerTransaction tx = ledgerFacade.executeTransferWithRetry(
-            refId,
+            referenceOr(idempotencyKey, "P2P"),
             request.sourceWalletId(),
             request.destinationWalletId(),
             request.amount(),
@@ -109,5 +73,22 @@ public class TransferServiceImpl implements TransferService {
         );
 
         return TransferResponse.from(tx);
+    }
+
+    @Override
+    public TransferResponse reverse(UUID originalTransactionId, String idempotencyKey, String description) {
+        LedgerTransaction tx = ledgerFacade.reverseWithRetry(
+            originalTransactionId,
+            referenceOr(idempotencyKey, "REVERSAL"),
+            description
+        );
+
+        return TransferResponse.from(tx);
+    }
+
+    private String referenceOr(String idempotencyKey, String prefix) {
+        return idempotencyKey != null && !idempotencyKey.isBlank()
+            ? idempotencyKey
+            : prefix + "-" + UUID.randomUUID();
     }
 }

@@ -4,10 +4,12 @@ import com.minidigitalwallet.dto.request.LinkCardRequest;
 import com.minidigitalwallet.dto.response.PaymentMethodResponse;
 import com.minidigitalwallet.entity.PaymentMethod;
 import com.minidigitalwallet.entity.enums.PaymentMethodStatus;
+import com.minidigitalwallet.exception.AppException;
 import com.minidigitalwallet.exception.PaymentMethodNotFoundException;
 import com.minidigitalwallet.repository.PaymentMethodRepository;
 import com.minidigitalwallet.service.PaymentMethodService;
 import lombok.RequiredArgsConstructor;
+import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Transactional;
 
@@ -26,7 +28,9 @@ public class PaymentMethodServiceImpl implements PaymentMethodService {
         String cardNumber = request.cardNumber().trim();
         String last4 = cardNumber.substring(cardNumber.length() - 4);
         String maskedNumber = "**** **** **** " + last4;
-        String token = "tok_mock_" + request.provider().name().toLowerCase() + "_" + last4;
+        // Unique suffix prevents collisions when two different cards share the same last4.
+        String token = "tok_mock_" + request.provider().name().toLowerCase() + "_"
+            + last4 + "_" + UUID.randomUUID().toString().substring(0, 8);
 
         boolean isDefault = request.isDefault();
 
@@ -90,5 +94,19 @@ public class PaymentMethodServiceImpl implements PaymentMethodService {
     public PaymentMethod getPaymentMethodEntity(UUID id) {
         return paymentMethodRepository.findByIdAndStatus(id, PaymentMethodStatus.ACTIVE)
             .orElseThrow(() -> new PaymentMethodNotFoundException(id));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public PaymentMethod requireOwnedCard(UUID cardId, String walletOwnerId) {
+        PaymentMethod card = getPaymentMethodEntity(cardId);
+        if (!card.getOwnerId().equals(walletOwnerId)) {
+            throw new AppException(
+                "Payment method does not belong to the wallet owner",
+                HttpStatus.FORBIDDEN,
+                "payment-method-forbidden"
+            );
+        }
+        return card;
     }
 }

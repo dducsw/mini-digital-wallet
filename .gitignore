@@ -10,5 +10,8 @@ target/
 .vscode/
 
 *.log
+src/test/k6/summary-*.json
 .DS_Store
 Thumbs.db
+.agents
+plan

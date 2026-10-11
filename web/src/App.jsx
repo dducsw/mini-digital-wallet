@@ -1,72 +1,112 @@
-import React, { useState, useEffect } from 'react';
-import {
-  Wallet,
-  CreditCard,
-  PlusCircle,
-  ShieldCheck,
-  RefreshCw,
-  Trash2,
-  Lock,
-  Unlock,
-  CheckCircle2,
-  AlertCircle,
-  Copy,
-  Check,
-  User,
-  ExternalLink
-} from 'lucide-react';
+import React, { useState, useEffect, useCallback, useRef } from 'react';
+import { ArrowRightLeft, CreditCard, History } from 'lucide-react';
+import { api, isUnauthorized } from './services/api';
+import { formatCentsToUSD } from './utils/formatters';
 
-const formatCentsToUSD = (cents) => {
-  if (cents === null || cents === undefined) return '$0.00';
-  return new Intl.NumberFormat('en-US', {
-    style: 'currency',
-    currency: 'USD',
-  }).format(cents / 100);
-};
+// Common & Layout
+import Toast from './components/common/Toast';
+import Navbar from './components/layout/Navbar';
+
+// Views & Tabs
+import AuthPage from './components/auth/AuthPage';
+import WalletCard from './components/wallet/WalletCard';
+import TransfersTab from './components/transfers/TransfersTab';
+import PaymentMethodsTab from './components/cards/PaymentMethodsTab';
+import LedgerTab from './components/ledger/LedgerTab';
+
+// Modals
+import ProfileModal from './components/modals/ProfileModal';
+import LinkCardModal from './components/modals/LinkCardModal';
+import CreateWalletModal from './components/modals/CreateWalletModal';
 
 export default function App() {
-  const [currentOwner, setCurrentOwner] = useState('USER_987654');
-  const [wallet, setWallet] = useState(null);
-  const [paymentMethods, setPaymentMethods] = useState([]);
-  const [loading, setLoading] = useState(false);
+  // Authentication State
+  const [token, setToken] = useState(() => localStorage.getItem('wallet_token') || null);
+  const [currentUser, setCurrentUser] = useState(() => {
+    try {
+      const saved = localStorage.getItem('wallet_user');
+      if (!saved) return null;
+      const parsed = JSON.parse(saved);
+      if (parsed && parsed.fullName) {
+        parsed.fullName = parsed.fullName.replace(/\s*\(.*?\)/g, '').trim();
+      }
+      return parsed;
+    } catch {
+      return null;
+    }
+  });
+
+  // UI State
+  const [showDropdown, setShowDropdown] = useState(false);
+  const [showProfileModal, setShowProfileModal] = useState(false);
+  const [showLinkCardModal, setShowLinkCardModal] = useState(false);
+  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false);
+  const [activeTab, setActiveTab] = useState('transfers'); // 'transfers' | 'cards' | 'ledger'
   const [toast, setToast] = useState(null);
   const [copied, setCopied] = useState(false);
 
-  // Modals
-  const [showLinkCardModal, setShowLinkCardModal] = useState(false);
-  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false);
+  // Business Data
+  const [wallet, setWallet] = useState(null);
+  const [paymentMethods, setPaymentMethods] = useState([]);
+  const [ledgerEntries, setLedgerEntries] = useState([]);
 
-  // Form states
-  const [cardForm, setCardForm] = useState({
-    method_type: 'DEBIT_CARD',
-    provider: 'VISA',
-    card_number: '4242424242424242',
-    holder_name: 'NGUYEN VAN A',
-    is_default: true,
-  });
+  const toastTimer = useRef(null);
+  const copiedTimer = useRef(null);
 
-  const showToast = (type, message) => {
+  useEffect(() => {
+    return () => {
+      clearTimeout(toastTimer.current);
+      clearTimeout(copiedTimer.current);
+    };
+  }, []);
+
+  const showToast = useCallback((type, message) => {
     setToast({ type, message });
-    setTimeout(() => setToast(null), 4000);
-  };
+    clearTimeout(toastTimer.current);
+    toastTimer.current = setTimeout(() => setToast(null), 4000);
+  }, []);
+
+  // 401 = missing/invalid/expired JWT (or a demo token the backend rejects).
+  // Drop the dead session so the user lands back on login with a clear message
+  // instead of staring at an empty dashboard.
+  const handleSessionExpired = useCallback(() => {
+    setToken(null);
+    setCurrentUser(null);
+    setWallet(null);
+    setPaymentMethods([]);
+    setLedgerEntries([]);
+    localStorage.removeItem('wallet_token');
+    localStorage.removeItem('wallet_user');
+    showToast('error', 'Session invalid or expired. Please sign in again.');
+  }, [showToast]);
 
   const copyWalletId = (id) => {
-    if (!id) return;
-    navigator.clipboard.writeText(id);
+    if (!id || !navigator.clipboard) return;
+    navigator.clipboard.writeText(id).catch(() => {});
     setCopied(true);
-    setTimeout(() => setCopied(false), 2000);
+    clearTimeout(copiedTimer.current);
+    copiedTimer.current = setTimeout(() => setCopied(false), 2000);
   };
 
-  // Fetch Wallet & Payment Methods for current user
-  const loadData = async (ownerId = currentOwner) => {
-    setLoading(true);
+  // Load Wallet Data
+  const loadData = useCallback(async () => {
+    if (!currentUser) return;
+    const ownerId = currentUser.userId || currentUser.username || 'USER_DEMO';
+
     try {
-      // 1. Fetch wallet
-      const walletRes = await fetch(`/api/v1/wallets?owner_id=${ownerId}`);
+      let activeWallet = null;
+
+      // 1. Fetch Wallets
+      const walletRes = await api.getWallets(ownerId, token);
+      if (isUnauthorized(walletRes)) {
+        handleSessionExpired();
+        return;
+      }
       if (walletRes.ok) {
         const wallets = await walletRes.json();
         if (wallets && wallets.length > 0) {
-          setWallet(wallets[0]);
+          activeWallet = wallets[0];
+          setWallet(activeWallet);
         } else {
           setWallet(null);
         }
@@ -74,74 +114,211 @@ export default function App() {
         setWallet(null);
       }
 
-      // 2. Fetch payment methods
-      const pmRes = await fetch(`/api/v1/payment-methods?owner_id=${ownerId}`);
+      // 2. Fetch Payment Methods
+      const pmRes = await api.getPaymentMethods(ownerId, token);
+      if (isUnauthorized(pmRes)) {
+        handleSessionExpired();
+        return;
+      }
       if (pmRes.ok) {
         const pms = await pmRes.json();
         setPaymentMethods(pms);
       } else {
         setPaymentMethods([]);
       }
+
+      // 3. Fetch Ledger Entries
+      if (activeWallet && activeWallet.id) {
+        const entriesRes = await api.getLedgerEntries(activeWallet.id, token);
+        if (isUnauthorized(entriesRes)) {
+          handleSessionExpired();
+          return;
+        }
+        if (entriesRes.ok) {
+          const entries = await entriesRes.json();
+          setLedgerEntries(entries);
+        } else {
+          setLedgerEntries([]);
+        }
+      }
     } catch {
-      // Mock fallback if backend is offline so UI is immediately interactive
-      setWallet({
+      // Offline fallback mock data
+      const fallbackWallet = {
         id: '0191fa30-9b48-732a-bc91-23588921a100',
         owner_id: ownerId,
         account_type: 'USER',
         status: 'ACTIVE',
-        available_balance: 50000, // $500.00
-        ledger_balance: 50000,
+        available_balance: 145000,
+        ledger_balance: 145000,
         currency: 'USD',
         version: 1,
-      });
-      setPaymentMethods([
+      };
+      setWallet(fallbackWallet);
+
+      const fallbackPms = [
         {
           id: 'pm-01-mock',
           method_type: 'DEBIT_CARD',
           provider: 'VISA',
-          masked_number: '**** **** **** 4242',
-          holder_name: 'NGUYEN VAN A',
+          masked_number: '•••• •••• •••• 4242',
+          holder_name: currentUser.fullName || currentUser.username || 'ALICE TRAN',
           is_default: true,
           status: 'ACTIVE',
         },
+      ];
+      setPaymentMethods(fallbackPms);
+
+      setLedgerEntries([
+        {
+          id: 'entry-01',
+          wallet_id: fallbackWallet.id,
+          entry_type: 'CREDIT',
+          amount: 100000,
+          line_no: 1,
+          balance_after: 100000,
+          created_at: new Date(Date.now() - 7200000).toISOString(),
+        },
+        {
+          id: 'entry-02',
+          wallet_id: fallbackWallet.id,
+          entry_type: 'CREDIT',
+          amount: 45000,
+          line_no: 2,
+          balance_after: 145000,
+          created_at: new Date().toISOString(),
+        },
       ]);
-    } finally {
-      setLoading(false);
+    }
+  }, [currentUser, token, handleSessionExpired]);
+
+  useEffect(() => {
+    if (currentUser) {
+      loadData();
+    }
+  }, [currentUser, loadData]);
+
+  // Auth Handlers
+  const handleLogin = async (username, password) => {
+    try {
+      const res = await api.login(username, password);
+      if (res.ok) {
+        const data = await res.json();
+        setToken(data.accessToken);
+        const userData = {
+          userId: data.userId,
+          username: data.username,
+          email: data.email,
+          fullName: data.username,
+        };
+        setCurrentUser(userData);
+        localStorage.setItem('wallet_token', data.accessToken);
+        localStorage.setItem('wallet_user', JSON.stringify(userData));
+        showToast('success', `Welcome back, ${data.username}!`);
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Invalid username or password');
+      }
+    } catch {
+      const demoUser = {
+        userId: 'USER_' + username.toUpperCase(),
+        username,
+        email: `${username}@example.com`,
+        fullName: username.toUpperCase(),
+      };
+      const demoToken = 'mock-jwt-token-' + Date.now();
+      setToken(demoToken);
+      setCurrentUser(demoUser);
+      localStorage.setItem('wallet_token', demoToken);
+      localStorage.setItem('wallet_user', JSON.stringify(demoUser));
+      showToast('success', `Signed in (Demo Mode): ${demoUser.username}`);
     }
   };
 
-  useEffect(() => {
-    loadData(currentOwner);
-  }, [currentOwner]);
-
-  // Handle Create Wallet
-  const handleCreateWallet = async (e) => {
-    e.preventDefault();
+  const handleRegister = async (form) => {
     try {
-      const res = await fetch('/api/v1/wallets', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          owner_id: currentOwner,
-          currency: 'USD',
-          wallet_type: 'USER',
-        }),
-      });
+      const res = await api.register(form);
+      if (res.ok) {
+        const data = await res.json();
+        setToken(data.accessToken);
+        const userData = {
+          userId: data.userId,
+          username: data.username,
+          email: data.email,
+          fullName: form.fullName || data.username,
+        };
+        setCurrentUser(userData);
+        localStorage.setItem('wallet_token', data.accessToken);
+        localStorage.setItem('wallet_user', JSON.stringify(userData));
+        showToast('success', 'Account created successfully!');
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Could not register account');
+      }
+    } catch {
+      const demoUser = {
+        userId: 'USER_' + form.username.toUpperCase(),
+        username: form.username,
+        email: form.email,
+        fullName: form.fullName || form.username,
+      };
+      const demoToken = 'mock-jwt-token-' + Date.now();
+      setToken(demoToken);
+      setCurrentUser(demoUser);
+      localStorage.setItem('wallet_token', demoToken);
+      localStorage.setItem('wallet_user', JSON.stringify(demoUser));
+      showToast('success', 'Account created (Demo Mode)!');
+    }
+  };
 
+  const handleQuickDemoLogin = (demoName) => {
+    const demoUser = {
+      userId: `USER_${demoName.toUpperCase()}`,
+      username: demoName.toLowerCase(),
+      email: `${demoName.toLowerCase()}@wallet.io`,
+      fullName: `${demoName} Tran`,
+    };
+    setToken('demo-token-' + demoName);
+    setCurrentUser(demoUser);
+    localStorage.setItem('wallet_token', 'demo-token');
+    localStorage.setItem('wallet_user', JSON.stringify(demoUser));
+    showToast('success', `Quick login as: ${demoUser.fullName}`);
+  };
+
+  const handleLogout = () => {
+    setShowDropdown(false);
+    setToken(null);
+    setCurrentUser(null);
+    setWallet(null);
+    setPaymentMethods([]);
+    setLedgerEntries([]);
+    localStorage.removeItem('wallet_token');
+    localStorage.removeItem('wallet_user');
+    showToast('success', 'Logged out successfully');
+  };
+
+  // Wallet Handlers
+  const handleCreateWallet = async () => {
+    const ownerId = currentUser?.userId || currentUser?.username;
+    try {
+      const res = await api.createWallet({ ownerId, currency: 'USD', walletType: 'USER' }, token);
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
       if (res.ok) {
         const newWallet = await res.json();
         setWallet(newWallet);
         setShowCreateWalletModal(false);
-        showToast('success', 'Mở ví thanh toán USD thành công!');
+        showToast('success', 'USD Wallet created successfully!');
+        loadData();
       } else {
-        const err = await res.json();
-        showToast('error', err.detail || 'Không thể tạo ví');
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Failed to create wallet');
       }
     } catch {
-      // Fallback
       setWallet({
-        id: 'wal-new-mock-' + Date.now(),
-        owner_id: currentOwner,
+        id: 'wal-' + Date.now(),
+        owner_id: ownerId,
         account_type: 'USER',
         status: 'ACTIVE',
         available_balance: 0,
@@ -150,502 +327,379 @@ export default function App() {
         version: 0,
       });
       setShowCreateWalletModal(false);
-      showToast('success', 'Mở ví thanh toán thành công (Chế độ mô phỏng)');
+      showToast('success', 'Wallet created (Demo Mode)!');
     }
   };
 
-  // Handle Link Card
-  const handleLinkCard = async (e) => {
-    e.preventDefault();
+  const handleToggleFreeze = async () => {
+    if (!wallet) return;
+    const targetStatus = wallet.status === 'ACTIVE' ? 'FROZEN' : 'ACTIVE';
     try {
-      const res = await fetch('/api/v1/payment-methods', {
-        method: 'POST',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({
-          owner_id: currentOwner,
+      const res = await api.updateWalletStatus(wallet.id, targetStatus, token);
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
+      if (res.ok) {
+        const updated = await res.json();
+        setWallet(updated);
+        showToast(
+          'success',
+          targetStatus === 'FROZEN' ? 'Wallet safely frozen' : 'Wallet reactivated'
+        );
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Could not change status');
+      }
+    } catch {
+      setWallet((prev) => ({ ...prev, status: targetStatus }));
+      showToast(
+        'success',
+        targetStatus === 'FROZEN' ? 'Wallet frozen (Demo Mode)' : 'Wallet reactivated (Demo Mode)'
+      );
+    }
+  };
+
+  // Payment Method Handlers
+  const handleLinkCard = async (cardForm) => {
+    const ownerId = currentUser?.userId || currentUser?.username;
+    try {
+      const res = await api.linkCard(
+        {
+          owner_id: ownerId,
           method_type: cardForm.method_type,
           provider: cardForm.provider,
           card_number: cardForm.card_number,
           holder_name: cardForm.holder_name,
           is_default: cardForm.is_default,
-        }),
-      });
-
+        },
+        token
+      );
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
       if (res.ok) {
         setShowLinkCardModal(false);
-        showToast('success', 'Liên kết thẻ thành công (Token hóa an toàn)');
-        loadData(currentOwner);
+        showToast('success', 'Payment card linked successfully (PCI-DSS tokenized)!');
+        loadData();
       } else {
-        const err = await res.json();
-        showToast('error', err.detail || 'Lỗi liên kết thẻ');
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Failed to link card');
       }
     } catch {
-      // Fallback
       const newCard = {
         id: 'pm-' + Date.now(),
         method_type: cardForm.method_type,
         provider: cardForm.provider,
-        masked_number: '**** **** **** ' + cardForm.card_number.slice(-4),
+        masked_number: '•••• •••• •••• ' + cardForm.card_number.slice(-4),
         holder_name: cardForm.holder_name.toUpperCase(),
         is_default: cardForm.is_default,
         status: 'ACTIVE',
       };
       setPaymentMethods((prev) => [newCard, ...prev]);
       setShowLinkCardModal(false);
-      showToast('success', 'Liên kết thẻ thành công (Chế độ mô phỏng)');
+      showToast('success', 'Card linked successfully (Demo Mode)');
     }
   };
 
-  // Handle Revoke Card
   const handleRevokeCard = async (id) => {
-    if (!window.confirm('Bạn có chắc muốn hủy liên kết phương thức này?')) return;
+    if (!window.confirm('Are you sure you want to revoke this payment card?')) return;
     try {
-      const res = await fetch(`/api/v1/payment-methods/${id}`, {
-        method: 'DELETE',
-      });
+      const res = await api.revokeCard(id, token);
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
       if (res.ok || res.status === 204) {
-        showToast('success', 'Đã hủy liên kết thẻ thành công');
-        loadData(currentOwner);
+        showToast('success', 'Card removed successfully');
+        loadData();
       } else {
-        showToast('error', 'Không thể hủy thẻ');
+        showToast('error', 'Failed to remove card');
       }
     } catch {
       setPaymentMethods((prev) => prev.filter((item) => item.id !== id));
-      showToast('success', 'Đã hủy thẻ (Chế độ mô phỏng)');
+      showToast('success', 'Card removed (Demo Mode)');
     }
   };
 
-  // Toggle Wallet Freeze / Unfreeze
-  const handleToggleFreeze = async () => {
-    if (!wallet) return;
-    const targetStatus = wallet.status === 'ACTIVE' ? 'FROZEN' : 'ACTIVE';
+  // Transfer Handlers
+  const handleTopUp = async (amount, pmId) => {
+    if (!wallet || !pmId) {
+      showToast('error', 'Please link a payment card first');
+      return;
+    }
+    const cents = Math.round(parseFloat(amount) * 100);
+    if (isNaN(cents) || cents <= 0) {
+      showToast('error', 'Please enter a valid amount');
+      return;
+    }
+
     try {
-      const res = await fetch(`/api/v1/wallets/${wallet.id}/status`, {
-        method: 'PATCH',
-        headers: { 'Content-Type': 'application/json' },
-        body: JSON.stringify({ status: targetStatus }),
-      });
+      const res = await api.topUp(
+        {
+          walletId: wallet.id,
+          paymentMethodId: pmId,
+          amount: cents,
+          description: `Top-up $${amount} from card`,
+        },
+        token
+      );
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
       if (res.ok) {
-        const updated = await res.json();
-        setWallet(updated);
-        showToast(
-          'success',
-          targetStatus === 'FROZEN' ? 'Đã đóng băng ví an toàn' : 'Đã mở khóa ví hoạt động'
-        );
+        showToast('success', `Top-up successful: +${formatCentsToUSD(cents)}`);
+        loadData();
       } else {
-        const err = await res.json();
-        showToast('error', err.detail || 'Không thể đổi trạng thái');
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Top-up failed');
       }
     } catch {
-      setWallet((prev) => ({ ...prev, status: targetStatus }));
-      showToast(
-        'success',
-        targetStatus === 'FROZEN' ? 'Đã đóng băng ví (Mô phỏng)' : 'Đã mở khóa ví (Mô phỏng)'
-      );
+      setWallet((prev) => ({
+        ...prev,
+        available_balance: prev.available_balance + cents,
+        ledger_balance: prev.ledger_balance + cents,
+      }));
+      setLedgerEntries((prev) => [
+        {
+          id: 'entry-' + Date.now(),
+          wallet_id: wallet.id,
+          entry_type: 'CREDIT',
+          amount: cents,
+          line_no: prev.length + 1,
+          balance_after: wallet.available_balance + cents,
+          created_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      showToast('success', `Top-up successful (Demo Mode): +${formatCentsToUSD(cents)}`);
     }
   };
 
+  const handleWithdraw = async (amount, pmId) => {
+    if (!wallet || !pmId) {
+      showToast('error', 'Please link a payment card first');
+      return;
+    }
+    const cents = Math.round(parseFloat(amount) * 100);
+    if (isNaN(cents) || cents <= 0) {
+      showToast('error', 'Please enter a valid amount');
+      return;
+    }
+    if (wallet.available_balance < cents) {
+      showToast('error', 'Insufficient available balance');
+      return;
+    }
+
+    try {
+      const res = await api.withdraw(
+        {
+          walletId: wallet.id,
+          paymentMethodId: pmId,
+          amount: cents,
+          description: `Withdraw $${amount} to card`,
+        },
+        token
+      );
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
+      if (res.ok) {
+        showToast('success', `Withdrawal successful: -${formatCentsToUSD(cents)}`);
+        loadData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Withdrawal failed');
+      }
+    } catch {
+      setWallet((prev) => ({
+        ...prev,
+        available_balance: prev.available_balance - cents,
+        ledger_balance: prev.ledger_balance - cents,
+      }));
+      setLedgerEntries((prev) => [
+        {
+          id: 'entry-' + Date.now(),
+          wallet_id: wallet.id,
+          entry_type: 'DEBIT',
+          amount: cents,
+          line_no: prev.length + 1,
+          balance_after: wallet.available_balance - cents,
+          created_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      showToast('success', `Withdrawal successful (Demo Mode): -${formatCentsToUSD(cents)}`);
+    }
+  };
+
+  const handleP2pTransfer = async (amount, destWalletId) => {
+    if (!wallet) return;
+    if (!destWalletId.trim()) {
+      showToast('error', 'Recipient wallet ID is required');
+      return;
+    }
+    const cents = Math.round(parseFloat(amount) * 100);
+    if (isNaN(cents) || cents <= 0) {
+      showToast('error', 'Please enter a valid amount');
+      return;
+    }
+    if (wallet.available_balance < cents) {
+      showToast('error', 'Insufficient available balance');
+      return;
+    }
+
+    try {
+      const res = await api.p2pTransfer(
+        {
+          sourceWalletId: wallet.id,
+          destinationWalletId: destWalletId.trim(),
+          amount: cents,
+          description: `P2P transfer $${amount}`,
+        },
+        token
+      );
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
+      if (res.ok) {
+        showToast('success', `Transfer successful: -${formatCentsToUSD(cents)}`);
+        loadData();
+      } else {
+        const err = await res.json().catch(() => ({}));
+        showToast('error', err.detail || 'Transfer failed');
+      }
+    } catch {
+      setWallet((prev) => ({
+        ...prev,
+        available_balance: prev.available_balance - cents,
+        ledger_balance: prev.ledger_balance - cents,
+      }));
+      setLedgerEntries((prev) => [
+        {
+          id: 'entry-' + Date.now(),
+          wallet_id: wallet.id,
+          entry_type: 'DEBIT',
+          amount: cents,
+          line_no: prev.length + 1,
+          balance_after: wallet.available_balance - cents,
+          created_at: new Date().toISOString(),
+        },
+        ...prev,
+      ]);
+      showToast('success', `Transfer successful (Demo Mode): -${formatCentsToUSD(cents)}`);
+    }
+  };
+
+  // Render Auth View if not logged in
+  if (!currentUser) {
+    return (
+      <AuthPage
+        onLogin={handleLogin}
+        onRegister={handleRegister}
+        onQuickDemoLogin={handleQuickDemoLogin}
+        toast={toast}
+        onCloseToast={() => setToast(null)}
+      />
+    );
+  }
+
+  // Render Dashboard
   return (
     <div className="app-container">
-      {/* Top Navbar */}
-      <header className="top-navbar">
-        <div className="nav-content">
-          <div className="brand-area">
-            <div className="brand-icon">
-              <Wallet size={20} strokeWidth={2.4} />
-            </div>
-            <div>
-              <div className="brand-title">Mini Digital Wallet</div>
-              <div className="brand-subtitle">Core Banking Ledger Architecture</div>
-            </div>
-          </div>
+      <Navbar
+        currentUser={currentUser}
+        showDropdown={showDropdown}
+        setShowDropdown={setShowDropdown}
+        onOpenProfile={() => setShowProfileModal(true)}
+        onLogout={handleLogout}
+      />
 
-          <div className="user-selector-area">
-            <div className="user-chip">
-              <User size={16} color="#1d4ed8" />
-              <span>Chủ ví:</span>
-              <select
-                value={currentOwner}
-                onChange={(e) => setCurrentOwner(e.target.value)}
-                style={{
-                  border: 'none',
-                  background: 'transparent',
-                  fontWeight: 600,
-                  color: 'inherit',
-                  cursor: 'pointer',
-                  outline: 'none',
-                }}
-              >
-                <option value="USER_987654">USER_987654 (Nguyễn Văn A)</option>
-                <option value="USER_ALICE">USER_ALICE (Alice Tran)</option>
-                <option value="USER_BOB">USER_BOB (Bob Le)</option>
-              </select>
-            </div>
+      <main className="main-wrapper">
+        <Toast toast={toast} onClose={() => setToast(null)} />
 
-            <button
-              className="btn btn-secondary btn-sm"
-              onClick={() => loadData(currentOwner)}
-              title="Làm mới dữ liệu"
-            >
-              <RefreshCw size={14} className={loading ? 'spin' : ''} />
-              Làm mới
-            </button>
-          </div>
+        <WalletCard
+          wallet={wallet}
+          copied={copied}
+          onCopyId={copyWalletId}
+          onToggleFreeze={handleToggleFreeze}
+          onCreateWalletClick={() => setShowCreateWalletModal(true)}
+        />
+
+        {/* Tab Controls */}
+        <div className="app-tabs">
+          <button
+            className={`app-tab-btn ${activeTab === 'transfers' ? 'active' : ''}`}
+            onClick={() => setActiveTab('transfers')}
+          >
+            <ArrowRightLeft size={15} />
+            Transfers
+          </button>
+          <button
+            className={`app-tab-btn ${activeTab === 'cards' ? 'active' : ''}`}
+            onClick={() => setActiveTab('cards')}
+          >
+            <CreditCard size={15} />
+            Payment Methods ({paymentMethods.length})
+          </button>
+          <button
+            className={`app-tab-btn ${activeTab === 'ledger' ? 'active' : ''}`}
+            onClick={() => setActiveTab('ledger')}
+          >
+            <History size={15} />
+            History ({ledgerEntries.length})
+          </button>
         </div>
-      </header>
 
-      {/* Main Container */}
-      <main className="main-content">
-        {/* Toast Feedback */}
-        {toast && (
-          <div className={`toast-bar toast-${toast.type}`}>
-            <div style={{ display: 'flex', alignItems: 'center', gap: '0.5rem' }}>
-              {toast.type === 'success' ? <CheckCircle2 size={18} /> : <AlertCircle size={18} />}
-              <span>{toast.message}</span>
-            </div>
-            <button
-              onClick={() => setToast(null)}
-              style={{ background: 'transparent', border: 'none', cursor: 'pointer', color: 'inherit' }}
-            >
-              ×
-            </button>
-          </div>
+        {/* Tab Contents */}
+        {activeTab === 'transfers' && (
+          <TransfersTab
+            wallet={wallet}
+            paymentMethods={paymentMethods}
+            onTopUp={handleTopUp}
+            onWithdraw={handleWithdraw}
+            onP2pTransfer={handleP2pTransfer}
+          />
         )}
 
-        {/* Balance Grid Section */}
-        {wallet ? (
-          <section className="balance-grid">
-            {/* Card 1: Available Balance */}
-            <div className="card card-primary">
-              <div className="card-label">
-                <span>Số Dư Khả Dụng (Available)</span>
-                <span className="badge badge-active" style={{ background: 'rgba(255,255,255,0.2)', color: '#fff', border: 'none' }}>
-                  {wallet.currency || 'USD'}
-                </span>
-              </div>
-              <div className="balance-amount">{formatCentsToUSD(wallet.available_balance)}</div>
-              <div className="card-subtext">
-                Tức thời O(1) Snapshot Projection • Minor Units ({wallet.available_balance?.toLocaleString()} cents)
-              </div>
-
-              <div className="actions-bar">
-                <button
-                  className="btn btn-outline-white"
-                  onClick={handleToggleFreeze}
-                >
-                  {wallet.status === 'ACTIVE' ? (
-                    <>
-                      <Lock size={15} /> Khóa Ví (Freeze)
-                    </>
-                  ) : (
-                    <>
-                      <Unlock size={15} /> Mở Khóa Ví
-                    </>
-                  )}
-                </button>
-                <button
-                  className="btn btn-outline-white"
-                  onClick={() => setShowLinkCardModal(true)}
-                >
-                  <CreditCard size={15} /> Liên kết thẻ
-                </button>
-              </div>
-            </div>
-
-            {/* Card 2: Ledger Balance */}
-            <div className="card">
-              <div className="card-label">
-                <span>Số Dư Sổ Cái (Ledger)</span>
-                <ShieldCheck size={16} color="#1d4ed8" />
-              </div>
-              <div className="balance-amount" style={{ color: '#0f172a' }}>
-                {formatCentsToUSD(wallet.ledger_balance)}
-              </div>
-              <div className="card-subtext">
-                Số dư kế toán kép xác nhận từ bảng <code>ledger_entries</code>.
-              </div>
-            </div>
-
-            {/* Card 3: Account Status & Metadata */}
-            <div className="card">
-              <div className="card-label">
-                <span>Thông Tin Định Danh</span>
-                <span
-                  className={`badge ${
-                    wallet.status === 'ACTIVE' ? 'badge-active' : 'badge-frozen'
-                  }`}
-                >
-                  {wallet.status || 'ACTIVE'}
-                </span>
-              </div>
-              
-              <div style={{ marginTop: '0.75rem' }}>
-                <div style={{ fontSize: '0.75rem', color: '#64748b' }}>Mã ví (Wallet UUID)</div>
-                <div
-                  style={{
-                    display: 'flex',
-                    alignItems: 'center',
-                    gap: '0.5rem',
-                    fontSize: '0.85rem',
-                    fontWeight: 600,
-                    marginTop: '0.2rem',
-                    fontFamily: 'monospace',
-                  }}
-                >
-                  <span title={wallet.id}>
-                    {wallet.id?.slice(0, 14)}...
-                  </span>
-                  <button
-                    onClick={() => copyWalletId(wallet.id)}
-                    className="btn btn-secondary btn-sm"
-                    style={{ padding: '0.2rem 0.4rem' }}
-                    title="Sao chép ID"
-                  >
-                    {copied ? <Check size={12} color="#16a34a" /> : <Copy size={12} />}
-                  </button>
-                </div>
-
-                <div style={{ marginTop: '0.85rem', fontSize: '0.8125rem', color: '#475569' }}>
-                  Loại ví: <strong>{wallet.account_type || wallet.wallet_type || 'USER'}</strong>
-                  <br />
-                  Phiên bản lock: <strong>v{wallet.version || 0}</strong>
-                </div>
-              </div>
-            </div>
-          </section>
-        ) : (
-          /* Empty Wallet State */
-          <div className="card" style={{ textAlign: 'center', padding: '3rem 1.5rem', marginBottom: '2rem' }}>
-            <Wallet size={48} color="#94a3b8" style={{ margin: '0 auto 1rem' }} />
-            <h3 style={{ fontSize: '1.25rem', fontWeight: 600, marginBottom: '0.5rem' }}>
-              Chưa tìm thấy ví thanh toán cho {currentOwner}
-            </h3>
-            <p style={{ color: '#64748b', fontSize: '0.875rem', marginBottom: '1.5rem' }}>
-              Người dùng này chưa có ví tiền tệ USD. Mở ví ngay để bắt đầu giao dịch.
-            </p>
-            <button className="btn btn-primary" onClick={() => setShowCreateWalletModal(true)}>
-              <PlusCircle size={16} /> Mở Ví Mới Ngay
-            </button>
-          </div>
+        {activeTab === 'cards' && (
+          <PaymentMethodsTab
+            paymentMethods={paymentMethods}
+            onOpenLinkCard={() => setShowLinkCardModal(true)}
+            onRevokeCard={handleRevokeCard}
+          />
         )}
 
-        {/* Linked Cards Section */}
-        <section>
-          <div className="section-title-bar">
-            <h2 className="section-title">
-              <CreditCard size={20} color="#1d4ed8" />
-              Thẻ & Phương Thức Thanh Toán (PCI-DSS Tokenized)
-            </h2>
-            <button className="btn btn-primary btn-sm" onClick={() => setShowLinkCardModal(true)}>
-              <PlusCircle size={15} /> Thêm Thẻ Mới
-            </button>
-          </div>
-
-          {paymentMethods.length > 0 ? (
-            <div className="cards-grid">
-              {paymentMethods.map((pm) => (
-                <div
-                  key={pm.id}
-                  className={`payment-card-item ${pm.is_default ? 'is-default' : ''}`}
-                >
-                  <div className="payment-card-header">
-                    <span className="card-provider-pill">{pm.provider}</span>
-                    <div style={{ display: 'flex', gap: '0.4rem', alignItems: 'center' }}>
-                      {pm.is_default && <span className="badge badge-default">Mặc định</span>}
-                      <span className="badge badge-active">{pm.status}</span>
-                    </div>
-                  </div>
-
-                  <div>
-                    <div className="masked-number-display">{pm.masked_number}</div>
-                    <div className="cardholder-name">{pm.holder_name}</div>
-                  </div>
-
-                  <div className="card-footer">
-                    <span style={{ fontSize: '0.75rem', color: '#64748b' }}>
-                      {pm.method_type}
-                    </span>
-                    <button
-                      className="btn btn-danger-outline btn-sm"
-                      onClick={() => handleRevokeCard(pm.id)}
-                      title="Hủy liên kết thẻ"
-                    >
-                      <Trash2 size={13} /> Hủy thẻ
-                    </button>
-                  </div>
-                </div>
-              ))}
-            </div>
-          ) : (
-            <div className="card" style={{ textAlign: 'center', padding: '2rem 1.5rem', color: '#64748b' }}>
-              <CreditCard size={32} color="#cbd5e1" style={{ margin: '0 auto 0.75rem' }} />
-              <p style={{ fontSize: '0.875rem' }}>
-                Chưa có phương thức thanh toán nào liên kết. Nhấn <strong>Thêm Thẻ Mới</strong> để nạp tiền vào ví.
-              </p>
-            </div>
-          )}
-        </section>
+        {activeTab === 'ledger' && (
+          <LedgerTab ledgerEntries={ledgerEntries} />
+        )}
       </main>
 
-      {/* Modal: Link Card */}
-      {showLinkCardModal && (
-        <div className="modal-overlay" onClick={() => setShowLinkCardModal(false)}>
-          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="modal-title">Liên Kết Thẻ Thanh Toán Mới</h3>
-              <button className="close-btn" onClick={() => setShowLinkCardModal(false)}>
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleLinkCard}>
-              <div className="form-group">
-                <label className="form-label">Loại Thẻ / Tài Khoản</label>
-                <select
-                  className="form-select"
-                  value={cardForm.method_type}
-                  onChange={(e) => setCardForm({ ...cardForm, method_type: e.target.value })}
-                >
-                  <option value="DEBIT_CARD">Thẻ Ghi Nợ (Debit Card)</option>
-                  <option value="CREDIT_CARD">Thẻ Tín Dụng (Credit Card)</option>
-                  <option value="BANK_ACCOUNT">Tài Khoản Ngân Hàng</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Tổ Chức Phát Hành</label>
-                <select
-                  className="form-select"
-                  value={cardForm.provider}
-                  onChange={(e) => setCardForm({ ...cardForm, provider: e.target.value })}
-                >
-                  <option value="VISA">Visa</option>
-                  <option value="MASTERCARD">Mastercard</option>
-                  <option value="NAPAS">Napas</option>
-                </select>
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Số Thẻ (Card PAN)</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="4242 •••• •••• 4242"
-                  value={cardForm.card_number}
-                  onChange={(e) => setCardForm({ ...cardForm, card_number: e.target.value })}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Tên Chủ Thẻ (Không Dấu)</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  placeholder="NGUYEN VAN A"
-                  value={cardForm.holder_name}
-                  onChange={(e) => setCardForm({ ...cardForm, holder_name: e.target.value })}
-                  required
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-checkbox-label">
-                  <input
-                    type="checkbox"
-                    checked={cardForm.is_default}
-                    onChange={(e) => setCardForm({ ...cardForm, is_default: e.target.checked })}
-                  />
-                  Đặt làm phương thức thanh toán mặc định
-                </label>
-              </div>
-
-              <div
-                style={{
-                  fontSize: '0.75rem',
-                  color: '#64748b',
-                  backgroundColor: '#f8fafc',
-                  border: '1px solid #e2e8f0',
-                  borderRadius: '6px',
-                  padding: '0.65rem 0.85rem',
-                  marginBottom: '1.25rem',
-                  display: 'flex',
-                  alignItems: 'center',
-                  gap: '0.5rem',
-                }}
-              >
-                <ShieldCheck size={18} color="#16a34a" />
-                <span>
-                  Bảo mật chuẩn PCI-DSS: Hệ thống chuyển đổi số thẻ thành Token đại diện; không bao giờ lưu trữ số thẻ thật.
-                </span>
-              </div>
-
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end' }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowLinkCardModal(false)}
-                >
-                  Hủy
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  Xác Nhận Liên Kết
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+      {/* Modals */}
+      {showProfileModal && (
+        <ProfileModal
+          currentUser={currentUser}
+          onClose={() => setShowProfileModal(false)}
+        />
       )}
 
-      {/* Modal: Create Wallet */}
+      {showLinkCardModal && (
+        <LinkCardModal
+          onClose={() => setShowLinkCardModal(false)}
+          onLinkCard={handleLinkCard}
+        />
+      )}
+
       {showCreateWalletModal && (
-        <div className="modal-overlay" onClick={() => setShowCreateWalletModal(false)}>
-          <div className="modal-dialog" onClick={(e) => e.stopPropagation()}>
-            <div className="modal-header">
-              <h3 className="modal-title">Mở Ví Thanh Toán Mới</h3>
-              <button className="close-btn" onClick={() => setShowCreateWalletModal(false)}>
-                ✕
-              </button>
-            </div>
-
-            <form onSubmit={handleCreateWallet}>
-              <div className="form-group">
-                <label className="form-label">Mã Người Sở Hữu (Owner ID)</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value={currentOwner}
-                  readOnly
-                  disabled
-                />
-              </div>
-
-              <div className="form-group">
-                <label className="form-label">Đồng Tiền Chuẩn</label>
-                <input
-                  type="text"
-                  className="form-input"
-                  value="USD (Đơn vị tính: Cents)"
-                  readOnly
-                  disabled
-                />
-              </div>
-
-              <div style={{ display: 'flex', gap: '0.75rem', justifyContent: 'flex-end', marginTop: '1.5rem' }}>
-                <button
-                  type="button"
-                  className="btn btn-secondary"
-                  onClick={() => setShowCreateWalletModal(false)}
-                >
-                  Hủy
-                </button>
-                <button type="submit" className="btn btn-primary">
-                  Tạo Ví Ngay
-                </button>
-              </div>
-            </form>
-          </div>
-        </div>
+        <CreateWalletModal
+          currentUser={currentUser}
+          onClose={() => setShowCreateWalletModal(false)}
+          onCreateWallet={handleCreateWallet}
+        />
       )}
     </div>
   );

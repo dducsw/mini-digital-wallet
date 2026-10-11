@@ -153,7 +153,7 @@ sequenceDiagram
 
 ---
 
-## 5. Sequence Diagram: Luồng Truy Vấn Số Dư (`GET /api/v1/wallets/me`)
+## 5. Sequence Diagram: Luồng Truy Vấn Ví (`GET /api/v1/wallets?owner_id=`)
 
 ```mermaid
 sequenceDiagram
@@ -164,20 +164,20 @@ sequenceDiagram
     participant Repo as WalletRepository
     participant DB as PostgreSQL (Table: wallets)
 
-    Client->>Controller: GET /api/v1/wallets/me?userId=USR_001&currency=USD
-    Controller->>Service: getWalletByUserId("USR_001", "USD")
-    Service->>Repo: findByUserIdAndCurrencyAndWalletType("USR_001", "USD", USER)
-    Repo->>DB: SELECT * FROM wallets WHERE user_id = ? AND currency = ? AND wallet_type = 'USER'
-    DB-->>Repo: Record (hoặc Empty Result)
-    
-    alt Không tìm thấy ví
-        Repo-->>Service: Optional.empty()
-        Service-->>Controller: throw WalletNotFoundException("Wallet not found")
-        Controller-->>Client: HTTP 404 Not Found (RFC 7807 ProblemDetail)
+    Client->>Controller: GET /api/v1/wallets?owner_id=USR_001
+    Controller->>Service: getWalletsByUserId("USR_001")
+    Service->>Repo: findByUserId("USR_001")
+    Repo->>DB: SELECT * FROM wallets WHERE user_id = ?
+    DB-->>Repo: Records (hoặc Empty)
+
+    alt Không tìm thấy ví nào
+        Repo-->>Service: List rỗng
+        Service-->>Controller: []
+        Controller-->>Client: HTTP 200 OK []
     else Tìm thấy ví
-        Repo-->>Service: Optional.of(Wallet)
-        Service-->>Controller: WalletResponse DTO
-        Controller-->>Client: HTTP 200 OK<br/>{"id": "...", "userId": "USR_001", "currency": "USD", "availableBalance": 5000, "status": "ACTIVE"}
+        Repo-->>Service: List&lt;Wallet&gt;
+        Service-->>Controller: List&lt;WalletResponse&gt;
+        Controller-->>Client: HTTP 200 OK<br/>[{"id": "...", "ownerId": "USR_001", "availableBalance": 5000, "status": "ACTIVE"}]
     end
 ```
 

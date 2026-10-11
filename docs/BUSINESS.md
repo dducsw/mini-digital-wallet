@@ -25,13 +25,13 @@ Tài liệu giải thích toàn diện và chuyên sâu về các quy tắc tài
 Trong các hệ thống ngân hàng và fintech, **Core Ledger** đóng vai trò là **Nguồn Chân Lý Tài Chính Duy Nhất (Single Source of Truth)**. 
 
 ### Các Khái Niệm Dữ Liệu Tách Biệt:
-1. **Số Dư Tức Thời (Materialized Snapshot Projection - Bảng `accounts`)**:
+1. **Số Dư Tức Thời (Materialized Snapshot Projection - Bảng `wallets`)**:
    - `available_balance`: Số dư khả dụng để tiêu, phục vụ tra cứu nhanh $O(1)$ và kiểm tra `available_balance >= amount`.
-   - `ledger_balance`: Số dư kế toán đã ghi nhận.
+   - `ledger_balance`: Số dư kế toán đã ghi nhận (hiện cập nhật song song với `available_balance` trong cùng transaction).
 2. **Giao Dịch Gốc (Journal Header - Bảng `ledger_transactions`)**:
-   - Lưu vết cấp cao của giao dịch: ai thực hiện (`actor_id`), hành động (`operation`), mã định danh (`idempotency_key`), loại giao dịch, mã giao dịch đảo ngược (`reversal_of_transaction_id`).
+   - Lưu vết cấp cao của giao dịch: mã tham chiếu duy nhất (`reference_id`), loại giao dịch (`transaction_type`: `TOPUP`, `WITHDRAW`, `P2P_TRANSFER`, `REVERSAL`), số tiền, tiền tệ, mã giao dịch đảo ngược (`reversal_of_transaction_id`).
 3. **Dòng Bút Toán Thành Phần (Immutable Lines - Bảng `ledger_entries`)**:
-   - Lưu vết chi tiết từng biến động tiền tệ (Tài khoản nào, `DEBIT` hay `CREDIT`, bao nhiêu USD cents, dòng số mấy `line_no`).
+   - Lưu vết chi tiết từng biến động tiền tệ (ví nào, `DEBIT` hay `CREDIT`, bao nhiêu USD cents, dòng số mấy `line_no` với `UNIQUE(transaction_id, line_no)`).
    - Bất biến, append-only, tuyệt đối không được phép `UPDATE` hay `DELETE`.
 
 > **Định lý Bất Biến Kiểm Toán & Quy Ước Số Dư Tự Nhiên (Natural Balance)**:
@@ -61,10 +61,12 @@ stateDiagram-v2
 | Nghiệp vụ | `ACTIVE` (Hoạt động) | `FROZEN` (Đóng băng) | `CLOSED` (Đã đóng) |
 | :--- | :---: | :---: | :---: |
 | **Xem số dư / Sao kê** | Cho phép | Cho phép | Cho phép |
-| **Nạp tiền (Top-up)** | Cho phép | Cho phép (tùy chính sách) | Từ chối |
+| **Nạp tiền (Top-up)** | Cho phép | **Từ chối** | **Từ chối** |
 | **Rút tiền (Withdraw)** | Cho phép | **Từ chối** | **Từ chối** |
 | **Chuyển tiền đi (Transfer Out)** | Cho phép | **Từ chối** | **Từ chối** |
-| **Nhận tiền chuyển đến (Transfer In)** | Cho phép | Cho phép | **Từ chối** |
+| **Nhận tiền chuyển đến (Transfer In)** | Cho phép | **Từ chối** | **Từ chối** |
+
+> Lưu ý: code hiện tại từ chối mọi giao dịch ghi nợ/ghi có trên ví `FROZEN` hoặc `CLOSED` (kiểm tra trong `LedgerServiceImpl.validateWalletsTransferable`).
 
 ---
 
@@ -92,47 +94,44 @@ stateDiagram-v2
 
 ### 3.3 Nạp Tiền Vào Ví (Top-up via Tokenized Card)
 - **Mục đích**: Ghi nhận dòng tiền từ thẻ liên kết vào ví người dùng.
-- **Quy trình xử lý**:
-  1. Kiểm tra ví đích tồn tại và đang ở trạng thái `ACTIVE`.
-  2. Kiểm tra `payment_method_id` tồn tại, thuộc quyền sở hữu của user và ở trạng thái `ACTIVE`.
-  3. Gọi Mock Payment Gateway để charge tiền từ `payment_token` của thẻ.
-  4. Sau khi Gateway xác nhận thành công: chèn bản ghi `IN_PROGRESS` vào `idempotency_records` theo scope `(actor_id, 'TOPUP', idempotency_key)` với lease 30s.
-  5. Khóa tài khoản ví đích và tài khoản hệ thống `SYS_EXTERNAL_SETTLEMENT` theo thứ tự: `min(id) -> max(id)` bằng `SELECT ... FOR UPDATE`.
-  6. Ghi 1 bản ghi cha `ledger_transactions` (type: `DEPOSIT`, currency: `USD`).
-  7. Ghi 2 bút toán `ledger_entries`:
-     - DEBIT: `SYS_EXTERNAL_SETTLEMENT` (nguồn đối ứng đối tác).
+- **Quy trình xử lý** (`POST /api/v1/transfers/topup`):
+  1. Kiểm tra ví đích tồn tại.
+  2. Kiểm tra thẻ tồn tại, ở trạng thái `ACTIVE` và thuộc quyền sở hữu của chủ ví (khác chủ $\rightarrow$ HTTP 403).
+  3. Khóa ví đích và ví hệ thống `SYS_EXTERNAL_SETTLEMENT` theo thứ tự UUID `min -> max` bằng `SELECT ... FOR UPDATE`.
+  4. Ghi 1 bản ghi cha `ledger_transactions` (type: `TOPUP`, currency: `USD`).
+  5. Ghi 2 bút toán `ledger_entries` (`line_no` 1, 2):
+     - DEBIT: `SYS_EXTERNAL_SETTLEMENT` (nguồn đối ứng).
      - CREDIT: Ví người dùng đích (tăng số dư ví).
-  8. Cập nhật snapshot `available_balance` ví người dùng.
-  9. Cập nhật `idempotency_records` sang `COMPLETED`. Commit transaction.
+  6. Cập nhật snapshot `available_balance` / `ledger_balance` ví người dùng trong cùng transaction rồi commit.
+- **Chưa có**: gọi Mock Payment Gateway charge thật và `idempotency_records` (Phase 3).
 
 ---
 
 ### 3.4 Rút Tiền Khỏi Ví Về Thẻ (Withdrawal to Linked Card)
 - **Mục đích**: Người dùng rút tiền từ ví về thẻ/tài khoản ngân hàng liên kết.
-- **Quy trình xử lý**:
-  1. Kiểm tra ví nguồn tồn tại và trạng thái `ACTIVE`.
-  2. Kiểm tra `payment_method_id` hợp lệ và thuộc về user.
-  3. Kiểm tra `amount > 0` và số dư khả dụng: `available_balance >= amount`.
-  4. Khóa các tài khoản theo thứ tự: `min(wallet_id, 'SYS_EXTERNAL_SETTLEMENT') -> max(...)` bằng `SELECT ... FOR UPDATE`.
-  5. Ghi bản ghi cha `ledger_transactions` (type: `WITHDRAWAL`, currency: `USD`).
-  6. Ghi 2 bút toán `ledger_entries`:
+- **Quy trình xử lý** (`POST /api/v1/transfers/withdraw`):
+  1. Kiểm tra ví nguồn tồn tại; kiểm tra thẻ hợp lệ và thuộc về user.
+  2. Kiểm tra `amount > 0` và số dư khả dụng: `available_balance >= amount` (dưới lock).
+  3. Khóa các ví theo thứ tự UUID `min -> max` bằng `SELECT ... FOR UPDATE`.
+  4. Ghi bản ghi cha `ledger_transactions` (type: `WITHDRAW`, currency: `USD`).
+  5. Ghi 2 bút toán `ledger_entries`:
      - DEBIT: Ví người dùng (giảm số dư ví).
-     - CREDIT: `SYS_EXTERNAL_SETTLEMENT` (đối ứng hoàn trả đối tác).
-  7. Cập nhật snapshot `available_balance` ví người dùng.
-  8. Gọi Mock Gateway thực hiện payout về token thẻ. Commit transaction.
+     - CREDIT: `SYS_EXTERNAL_SETTLEMENT` (đối ứng).
+  6. Cập nhật snapshot số dư rồi commit.
 
 ---
 
 ### 3.5 Chuyển Tiền P2P Sổ Kép (Double-Entry P2P Transfer)
-- **Mục đích**: Di chuyển tiền giữa 2 ví nội bộ ($A \rightarrow B$).
+- **Mục đích**: Di chuyển tiền giữa 2 ví nội bộ ($A \rightarrow B$), qua `POST /api/v1/transfers/p2p`.
 - **Nguyên lý Kế toán Kép & Xử lý Đồng thời**:
-  - Tách biệt Bean Proxy: Bean ngoài `LedgerFacade` đặt `@Retryable` bắt lỗi `40P01` deadlock; Bean trong `LedgerService` thực thi `@Transactional`.
+  - Tách biệt Bean Proxy: Bean ngoài `LedgerFacade` đặt `@Retryable` cho các lỗi khóa transient (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `DeadlockLoserDataAccessException`, `ConcurrencyFailureException`); Bean trong `LedgerServiceImpl` thực thi `@Transactional(READ_COMMITTED)`. Không dùng `@Recover` để lỗi nghiệp vụ (`InsufficientFunds`, trùng reference) luôn lan truyền nguyên dạng.
   - Khóa tuần tự: $\min(A, B) \rightarrow \max(A, B)$ bằng `SELECT ... FOR UPDATE`.
-  - Ghi bản ghi cha `ledger_transactions` (status: `POSTED`).
-  - Ghi 2 bút toán con `ledger_entries`:
-    - DEBIT ví nguồn $A$.
-    - CREDIT ví đích $B$.
-  - Cập nhật số dư snapshot cho cả 2 ví và sinh sự kiện vào `outbox_events` trong cùng một database transaction.
+  - Ghi bản ghi cha `ledger_transactions` (`transaction_type='P2P_TRANSFER'`).
+  - Ghi 2 bút toán con `ledger_entries` (`UNIQUE(transaction_id, line_no)`):
+    - DEBIT ví nguồn $A$ (`line_no=1`).
+    - CREDIT ví đích $B$ (`line_no=2`).
+  - Cập nhật số dư snapshot cho cả 2 ví trong cùng một database transaction rồi commit.
+- **Chưa có**: `idempotency_records` (Phase 3) và `outbox_events` (Phase 4).
 
 ```mermaid
 sequenceDiagram
@@ -142,42 +141,40 @@ sequenceDiagram
     participant Service as LedgerService (@Transactional)
     participant DB as PostgreSQL
 
-    Client->>Facade: POST /transfers (Idempotency-Key, A -> B, amount USD)
+    Client->>Facade: POST /transfers/p2p (Idempotency-Key, A -> B, amount USD)
     Facade->>Service: executeTransfer(cmd)
-    Note over Service: 1. Ghi nhận Scope Idempotency (IN_PROGRESS)
+    Note over Service: 1. Validate amount, self-transfer, referenceId
     Note over Service: 2. Sắp xếp thứ tự khóa: min(A,B) -> max(A,B)
     Service->>DB: Lock min(A, B) bằng SELECT ... FOR UPDATE
     Service->>DB: Lock max(A, B) bằng SELECT ... FOR UPDATE
-    Note over Service: 3. Kiểm tra ví A có available_balance >= amount?
+    Note over Service: 3. Kiểm tra trạng thái ví + ví A có available_balance >= amount?
     Service->>DB: UPDATE A SET available_balance = available_balance - amount
     Service->>DB: UPDATE B SET available_balance = available_balance + amount
-    Service->>DB: INSERT INTO ledger_transactions (id, type='TRANSFER', status='POSTED')
+    Service->>DB: INSERT INTO ledger_transactions (id, reference_id, transaction_type)
     Service->>DB: INSERT INTO ledger_entries (tx, acc=A, DEBIT, amount, line_no=1)
     Service->>DB: INSERT INTO ledger_entries (tx, acc=B, CREDIT, amount, line_no=2)
-    Service->>DB: INSERT INTO outbox_events (WalletDebitedEvent, WalletCreditedEvent)
-    Service->>DB: UPDATE idempotency_records SET status='COMPLETED'
     DB-->>Service: Commit Transaction (Atomicity)
     Service-->>Facade: Result
-    Facade-->>Client: 200 OK (Chuyển tiền thành công)
+    Facade-->>Client: 201 Created (TransferResponse)
 ```
 
 ---
 
 ### 3.6 Giao Dịch Hoàn Tiền (Reversals)
-- **Mục đích**: Hoàn trả tiền hoặc đảo bút toán giao dịch sai sót mà không vi phạm tính bất biến.
-- **Quy tắc**:
-  - **Tuyệt đối không sửa hay xóa**: Không `UPDATE` hay `DELETE` giao dịch gốc hay dòng `ledger_entries` cũ.
-  - Tạo giao dịch mới `ledger_transactions` với `type = 'REVERSAL'` và `reversal_of_transaction_id = <original_tx_id>`.
-  - Sinh 2 dòng `ledger_entries` đảo ngược hoàn toàn dòng tiền (Credit ví bị trừ, Debit ví đã nhận).
+- **Mục đích**: Hoàn trả tiền hoặc đảo bút toán giao dịch sai sót mà không vi phạm tính bất biến, qua `POST /api/v1/transfers/reversals` (`original_transaction_id`, `description`).
+- **Quy tắc** (`LedgerServiceImpl.reverseTransfer`):
+  - **Tuyệt đối không sửa hay xóa**: Không `UPDATE` hay `DELETE` giao dịch gốc hay dòng `ledger_entries` cũ (giao dịch đảo ghi thêm 1 `UPDATE` duy nhất để gắn `reversal_of_transaction_id` cho chính bản ghi reversal mới trong cùng transaction).
+  - Tạo giao dịch mới `ledger_transactions` với `transaction_type = 'REVERSAL'` và `reversal_of_transaction_id = <original_tx_id>`.
+  - Sinh 2 dòng `ledger_entries` đảo ngược hoàn toàn dòng tiền (debit ví đích gốc, credit ví nguồn gốc).
+  - Từ chối đảo ngược một giao dịch `REVERSAL`, và từ chối đảo ngược lần 2 (HTTP 409).
 
 ---
 
 ### 3.7 Sao Kê & Đối Soát (Statement & Reconciliation)
 - **Mục đích**: Cung cấp lịch sử giao dịch minh bạch cho người dùng và kiểm toán độc lập.
 - **Quy tắc**:
-  - Truy vấn từ `ledger_entries` liên kết `ledger_transactions` theo `wallet_id` sắp xếp theo `created_at DESC`.
-  - Định kỳ chạy `ReconciliationJob` xác minh toàn bộ ví:
-    $$\text{accounts.available\_balance} = \sum \text{Amount}_{\text{CREDIT}} - \sum \text{Amount}_{\text{DEBIT}}$$
+  - Sao kê: `GET /api/v1/ledger/wallets/{walletId}/entries` — truy vấn từ `ledger_entries` theo `wallet_id`, sắp xếp `created_at DESC`.
+  - Đối soát tự động (`ReconciliationJob`, kiểm tra $\text{available\_balance} = \sum \text{CREDIT} - \sum \text{DEBIT}$): **chưa hiện thực, phạm vi Phase 5**.
 
 ---
 
@@ -185,11 +182,11 @@ sequenceDiagram
 
 | # | Quy tắc bất biến | Cơ chế kỹ thuật đảm bảo | Hậu quả nếu vi phạm |
 | :-: | :--- | :--- | :--- |
-| **1** | **Không âm số dư ví người dùng** | Ràng buộc DB `CHECK (account_type = 'SYSTEM' OR available_balance >= 0)` | Thất thoát tài chính, nợ xấu |
-| **2** | **Sổ cái Bất Biến (Append-Only)** | Bảng `ledger_entries` không cấp quyền `UPDATE`/`DELETE`, hoàn tiền bằng Reversal | Mất dấu vết kiểm toán |
+| **1** | **Không âm số dư ví người dùng** | Ràng buộc DB `CHECK (wallet_type = 'SYSTEM' OR available_balance >= 0)` trên bảng `wallets` | Thất thoát tài chính, nợ xấu |
+| **2** | **Sổ cái Bất Biến (Append-Only)** | Bảng `ledger_entries` chỉ ghi thêm, hoàn tiền bằng Reversal (`UNIQUE(transaction_id, line_no)`) | Mất dấu vết kiểm toán |
 | **3** | **Cân Bằng Sổ Kép (Zero-Sum)** | Bắt buộc $\sum \text{Debit} = \sum \text{Credit}$ trên mỗi transaction, có System Accounts | Tiền tự sinh ra hoặc tự biến mất |
 | **4** | **Loại trừ Sai số Số thực (USD Only)** | Lưu số tiền kiểu `BIGINT` (minor units: cents), không hỗ trợ cross-currency | Sai số làm tròn tiền tệ |
-| **5** | **Idempotency Bền Vững có Phạm Vi** | Khóa chính `(actor_id, operation, idempotency_key)` trên PostgreSQL + Lease Expiry | Trừ tiền 2 lần hoặc kẹt trạng thái |
+| **5** | **Chống trùng giao dịch (tạm thời)** | `UNIQUE(reference_id)` trên `ledger_transactions` + `DataIntegrityViolation` $\rightarrow$ HTTP 409 | Trừ tiền 2 lần khi retry |
 
 ---
 
@@ -203,10 +200,12 @@ sequenceDiagram
 - **Kịch bản**: 2 giao dịch đồng thời giữa A và B.
 - **Giải pháp**:
   - Sắp xếp thứ tự khóa: $\min(A, B) \rightarrow \max(A, B)$ loại bỏ Circular Wait.
-  - Tầng ngoài `LedgerFacade` với Spring `@Retryable` bắt lỗi `40P01` tự động thử lại với transaction mới sạch sẽ.
+  - Tầng ngoài `LedgerFacade` với Spring `@Retryable` (tối đa 3 lần, backoff 100ms $\times$ 2) cho cả họ lỗi khóa transient (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `DeadlockLoserDataAccessException`, `ConcurrencyFailureException`), mỗi lần retry chạy trên transaction mới sạch sẽ.
+  - Không dùng `@Recover` để lỗi nghiệp vụ không bị bọc nhầm thành 503 (bài học từ test overdraft: `@Recover(Exception)` từng nuốt `InsufficientFundsException`).
 
 ### 5.3 Mạng Chập Chờn & Khách Hàng Bấm Gửi Nhiều Lần
-- **Giải pháp**: Bảng `idempotency_records` trên PostgreSQL. Cùng key và body đã hoàn thành $\rightarrow$ trả ngay kết quả cũ (HTTP 200). Đang chạy $\rightarrow$ HTTP 409 Conflict. Nếu worker crash quá hạn `lease_expires_at` $\rightarrow$ cho phép thu hồi và tái thực thi.
+- **Hiện tại (Phase 1–2)**: `reference_id` là `UNIQUE` ở DB. Client gửi kèm `Idempotency-Key` được dùng làm `reference_id`; request trùng $\rightarrow$ HTTP 409 Conflict (kể cả khi 2 thread đua nhau: luồng thua bị `UNIQUE` chặn và cũng nhận 409 thay vì 500).
+- **Phase 3 (chưa làm)**: Bảng `idempotency_records` khóa `(actor_id, operation, idempotency_key)` + SHA-256 `request_hash` + `lease_expires_at` để tái dùng key an toàn và thu hồi request treo.
 
 ### 5.4 Sự Cố Broker Kafka & At-Least-Once Delivery
-- **Giải pháp**: Transactional Outbox ghi event vào PostgreSQL. Khi Kafka khôi phục, poller quét và gửi bù. Phía Consumer sử dụng bảng `processed_events` để loại bỏ event trùng lặp trong cùng database transaction.
+- **Chưa hiện thực, phạm vi Phase 4**: Transactional Outbox (`outbox_events` + poller `SKIP LOCKED`) và deduplicate phía consumer (`processed_events`). Codebase hiện tại đã xóa các shell trống của module này để giữ service tối giản; đặc tả đầy đủ xem `PLAN.md`.

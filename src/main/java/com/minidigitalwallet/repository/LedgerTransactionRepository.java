@@ -13,4 +13,6 @@ public interface LedgerTransactionRepository extends JpaRepository<LedgerTransac
     Optional<LedgerTransaction> findByReferenceId(String referenceId);
 
     boolean existsByReferenceId(String referenceId);
+
+    boolean existsByReversalOfTransactionId(UUID originalTransactionId);
 }

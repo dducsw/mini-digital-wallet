@@ -3,11 +3,13 @@ package com.minidigitalwallet.controller;
 import com.minidigitalwallet.dto.request.CreateWalletRequest;
 import com.minidigitalwallet.dto.request.UpdateWalletStatusRequest;
 import com.minidigitalwallet.dto.response.WalletResponse;
+import com.minidigitalwallet.security.UserPrincipal;
 import com.minidigitalwallet.service.WalletService;
 import jakarta.validation.Valid;
 import lombok.RequiredArgsConstructor;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.security.core.annotation.AuthenticationPrincipal;
 import org.springframework.web.bind.annotation.*;
 
 import java.util.List;
@@ -42,18 +44,25 @@ public class WalletController {
     public ResponseEntity<List<WalletResponse>> getWalletsByOwner(
         @RequestParam(name = "owner_id", required = false) String ownerId,
         @RequestParam(name = "user_id", required = false) String userId,
-        @org.springframework.security.core.annotation.AuthenticationPrincipal com.minidigitalwallet.security.UserPrincipal principal
+        @AuthenticationPrincipal UserPrincipal principal
     ) {
-        String targetId = (ownerId != null && !ownerId.isBlank()) ? ownerId : userId;
-        if (targetId == null || targetId.isBlank()) {
-            if (principal != null) {
-                targetId = principal.getId().toString();
-            } else {
-                return ResponseEntity.badRequest().build();
+        String targetId = firstNonBlank(ownerId, userId);
+        if (targetId == null && principal != null) {
+            targetId = principal.getId().toString();
+        }
+        if (targetId == null) {
+            return ResponseEntity.badRequest().build();
+        }
+        return ResponseEntity.ok(walletService.getWalletsByUserId(targetId));
+    }
+
+    private String firstNonBlank(String... values) {
+        for (String value : values) {
+            if (value != null && !value.isBlank()) {
+                return value;
             }
         }
-        List<WalletResponse> responses = walletService.getWalletsByUserId(targetId);
-        return ResponseEntity.ok(responses);
+        return null;
     }
 
     @PatchMapping("/{id}/status")

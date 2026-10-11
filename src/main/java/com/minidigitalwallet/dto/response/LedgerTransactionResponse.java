@@ -53,6 +53,9 @@ public record LedgerTransactionResponse(
         @JsonProperty("amount")
         Long amount,
 
+        @JsonProperty("line_no")
+        Integer lineNo,
+
         @JsonProperty("balance_after")
         Long balanceAfter,
 
@@ -65,6 +68,7 @@ public record LedgerTransactionResponse(
                 entry.getWalletId(),
                 entry.getEntryType(),
                 entry.getAmount(),
+                entry.getLineNo(),
                 entry.getBalanceAfter(),
                 entry.getCreatedAt()
             );

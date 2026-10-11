@@ -1,0 +1,160 @@
+/* Mini Digital Wallet - flat style: mau phang, bo goc nhe, khong gradient. */
+body {
+  font-family: -apple-system, "Segoe UI", Roboto, Arial, sans-serif;
+  font-size: 14px;
+  background: #eef1f6;
+  color: #1a1a2e;
+  margin: 0;
+}
+
+.page { max-width: 640px; margin: 0 auto; padding: 16px; }
+.hidden { display: none; }
+.muted { color: #8a8fa3; font-size: 12px; }
+.mono { font-family: monospace; font-size: 12px; }
+.hint { float: right; color: #b0b5c7; font-weight: normal; font-size: 12px; }
+
+/* --- Logo --- */
+.logo { font-size: 24px; font-weight: 800; color: #111; }
+.logo span { color: #2563eb; }
+.logo-sub { font-size: 11px; letter-spacing: 2px; color: #8a8fa3; margin-bottom: 12px; }
+
+/* --- Message --- */
+#msg { max-width: 640px; margin: 12px auto 0; padding: 10px 14px; border-radius: 6px; }
+#msg.ok { background: #e6f9ee; color: #057a3a; }
+#msg.err { background: #fdecec; color: #c00; }
+
+/* --- Auth --- */
+.auth-card {
+  background: #fff;
+  border: 1px solid #e0e4ee;
+  border-radius: 8px;
+  padding: 24px;
+}
+
+/* --- Header --- */
+.topbar {
+  background: #fff;
+  border-bottom: 1px solid #e0e4ee;
+  padding: 10px 16px;
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  position: sticky;
+  top: 0;
+}
+.topbar .logo { font-size: 20px; }
+.topbar .logo-sub { margin-bottom: 0; }
+
+.account-pill {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  border: 1px solid #e0e4ee;
+  background: #f7f9fd;
+  border-radius: 6px;
+  padding: 5px 10px 5px 5px;
+  font-size: 13px;
+}
+.account-pill a { color: #c00; font-size: 12px; }
+.avatar {
+  width: 26px; height: 26px; border-radius: 50%;
+  background: #2563eb; color: #fff;
+  display: inline-flex; align-items: center; justify-content: center;
+  font-weight: 700; font-size: 13px;
+}
+
+/* --- Tabs --- */
+.tabs {
+  display: flex; gap: 6px;
+  max-width: 640px; margin: 12px auto 0; padding: 0 16px;
+}
+.tabs button {
+  flex: 1; border: 1px solid #e0e4ee; background: #fff;
+  border-radius: 6px; padding: 9px 4px; font-size: 12px;
+  color: #555; cursor: pointer;
+}
+.tabs button.active { background: #2563eb; border-color: #2563eb; color: #fff; font-weight: 700; }
+
+/* --- Content cards --- */
+.content { max-width: 640px; margin: 0 auto; padding: 16px; }
+.card {
+  background: #fff;
+  border: 1px solid #e0e4ee;
+  border-radius: 8px;
+  padding: 20px;
+  margin-bottom: 14px;
+}
+.card-title { font-size: 15px; font-weight: 800; margin-bottom: 12px; }
+.card-title .bar {
+  display: inline-block; width: 4px; height: 16px;
+  background: #2563eb; border-radius: 2px;
+  vertical-align: -2px; margin-right: 8px;
+}
+
+/* --- Balance card --- */
+.balance-card {
+  background: #15245b;
+  color: #fff;
+  border-radius: 8px;
+  padding: 22px;
+  margin-bottom: 14px;
+}
+.balance-top { display: flex; justify-content: space-between; font-size: 12px; letter-spacing: 1px; color: #aab; }
+.balance-top a { color: #aab; }
+.balance-amount { font-size: 40px; font-weight: 800; margin: 8px 0 14px; }
+.balance-amount .cur { font-size: 18px; color: #8fb0ff; }
+.balance-bottom {
+  border-top: 1px solid rgba(255, 255, 255, 0.2);
+  padding-top: 12px;
+  display: flex; justify-content: space-between;
+}
+.muted-light { font-size: 11px; color: #9aa0c3; }
+.strong { font-weight: 700; }
+.balance-bottom .right { text-align: right; }
+
+/* --- Form --- */
+label { display: block; font-weight: 700; font-size: 13px; margin: 12px 0 6px; }
+label.check { font-weight: normal; }
+input[type="text"], input[type="password"], input[type="email"],
+input[type="number"], select {
+  width: 100%; box-sizing: border-box;
+  border: 1px solid #d5dae6; background: #f7f9fd;
+  border-radius: 6px; padding: 10px 12px;
+  font-size: 14px;
+}
+input:focus, select:focus { outline: none; border-color: #2563eb; background: #fff; }
+
+.amount-wrap { display: flex; align-items: center; border: 1px solid #d5dae6; background: #f7f9fd; border-radius: 6px; }
+.amount-wrap span { padding-left: 12px; font-size: 16px; color: #8a8fa3; }
+.amount-wrap input { border: none; background: transparent; font-size: 20px; font-weight: 700; }
+.amount-wrap input:focus { background: transparent; }
+
+.pills { display: flex; gap: 8px; margin: 12px 0; flex-wrap: wrap; }
+.pills button {
+  flex: 1; border: 1px solid #d5dae6; background: #f1f4fa; border-radius: 6px;
+  padding: 9px 4px; font-size: 13px; font-weight: 700; color: #333; cursor: pointer;
+  white-space: nowrap;
+}
+.pills button.all { color: #2563eb; border-color: #2563eb; background: #eef4ff; }
+
+.btn-primary {
+  width: 100%; border: none; cursor: pointer;
+  background: #2563eb;
+  color: #fff; font-size: 15px; font-weight: 700;
+  border-radius: 6px; padding: 12px; margin-top: 14px;
+}
+.btn-primary:hover { background: #1d4ed8; }
+button:not(.btn-primary):not(.tabs button):not(.pills button) {
+  border: 1px solid #d5dae6; background: #fff; border-radius: 6px;
+  padding: 6px 12px; font-size: 12px; cursor: pointer; margin-right: 6px;
+}
+
+/* --- Entry list --- */
+.entry-list .row {
+  display: flex; justify-content: space-between; align-items: center;
+  padding: 10px 0; border-bottom: 1px solid #f0f2f7;
+}
+.entry-list .row:last-child { border-bottom: none; }
+.entry-list .sub { font-size: 12px; color: #8a8fa3; }
+.entry-list .plus { color: #059669; font-weight: 800; }
+.entry-list .minus { color: #dc2626; font-weight: 800; }

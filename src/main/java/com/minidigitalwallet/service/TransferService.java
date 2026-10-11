@@ -18,4 +18,6 @@ public interface TransferService {
     TransferResponse withdraw(WithdrawRequest request, String idempotencyKey);
 
     TransferResponse transfer(TransferRequest request, String idempotencyKey);
+
+    TransferResponse reverse(UUID originalTransactionId, String idempotencyKey, String description);
 }

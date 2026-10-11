@@ -80,7 +80,7 @@ class PaymentMethodServiceTest {
 
         assertThat(response).isNotNull();
         assertThat(response.maskedNumber()).isEqualTo("**** **** **** 4242");
-        assertThat(response.paymentToken()).isEqualTo("tok_mock_visa_4242");
+        assertThat(response.paymentToken()).startsWith("tok_mock_visa_4242_");
         assertThat(response.holderName()).isEqualTo("NGUYEN VAN A");
         assertThat(response.isDefault()).isTrue();
         assertThat(response.status()).isEqualTo(PaymentMethodStatus.ACTIVE);

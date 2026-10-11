@@ -1,9 +1,16 @@
 package com.minidigitalwallet.entity;
 
+import com.minidigitalwallet.domain.model.Money;
+import com.minidigitalwallet.domain.state.ActiveWalletState;
+import com.minidigitalwallet.domain.state.ClosedWalletState;
+import com.minidigitalwallet.domain.state.FrozenWalletState;
+import com.minidigitalwallet.domain.state.WalletState;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
+import com.minidigitalwallet.exception.AppException;
 import jakarta.persistence.*;
 import lombok.*;
+import org.springframework.http.HttpStatus;
 
 import java.time.Instant;
 import java.util.UUID;
@@ -91,6 +98,21 @@ public class Wallet {
         this.updatedAt = Instant.now();
     }
 
+    public Money getMoneyBalance() {
+        return Money.of(this.availableBalance, this.currency);
+    }
+
+    public WalletState getState() {
+        if (this.status == null) {
+            return ActiveWalletState.INSTANCE;
+        }
+        return switch (this.status) {
+            case ACTIVE -> ActiveWalletState.INSTANCE;
+            case FROZEN -> FrozenWalletState.INSTANCE;
+            case CLOSED -> ClosedWalletState.INSTANCE;
+        };
+    }
+
     public boolean isActive() {
         return this.status == WalletStatus.ACTIVE;
     }
@@ -103,24 +125,39 @@ public class Wallet {
         return this.status == WalletStatus.CLOSED;
     }
 
+    public void debit(Money money) {
+        if (money == null) {
+            throw new AppException("Debit amount cannot be null", HttpStatus.BAD_REQUEST, "invalid-amount");
+        }
+        money.validateCurrency(this.currency);
+        getState().debit(this, money);
+    }
+
     public void debit(Long amount) {
-        if (amount == null || amount <= 0) {
-            throw new IllegalArgumentException("Debit amount must be positive");
+        debit(Money.of(amount, this.currency));
+    }
+
+    public void credit(Money money) {
+        if (money == null) {
+            throw new AppException("Credit amount cannot be null", HttpStatus.BAD_REQUEST, "invalid-amount");
         }
-        if (this.walletType == WalletType.USER && this.availableBalance < amount) {
-            throw new com.minidigitalwallet.exception.InsufficientFundsException(
-                "Insufficient balance: " + this.availableBalance + " cents available, required: " + amount + " cents"
-            );
-        }
-        this.availableBalance -= amount;
-        this.ledgerBalance -= amount;
+        money.validateCurrency(this.currency);
+        getState().credit(this, money);
     }
 
     public void credit(Long amount) {
-        if (amount == null || amount <= 0) {
-            throw new IllegalArgumentException("Credit amount must be positive");
-        }
-        this.availableBalance += amount;
-        this.ledgerBalance += amount;
+        credit(Money.of(amount, this.currency));
+    }
+
+    public void freeze() {
+        getState().freeze(this);
+    }
+
+    public void unfreeze() {
+        getState().unfreeze(this);
+    }
+
+    public void close() {
+        getState().close(this);
     }
 }

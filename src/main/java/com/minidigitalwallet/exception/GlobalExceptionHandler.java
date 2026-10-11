@@ -1,6 +1,9 @@
 package com.minidigitalwallet.exception;
 
 import jakarta.servlet.http.HttpServletRequest;
+import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.dao.OptimisticLockingFailureException;
+import org.springframework.dao.PessimisticLockingFailureException;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ProblemDetail;
 import org.springframework.http.ResponseEntity;
@@ -53,6 +56,32 @@ public class GlobalExceptionHandler {
         pd.setInstance(URI.create(request.getRequestURI()));
         pd.setProperty("timestamp", Instant.now());
         return ResponseEntity.status(HttpStatus.BAD_REQUEST).body(pd);
+    }
+
+    @ExceptionHandler(DataIntegrityViolationException.class)
+    public ResponseEntity<ProblemDetail> handleDataIntegrityViolation(DataIntegrityViolationException ex, HttpServletRequest request) {
+        // Race on UNIQUE(reference_id): fast-fail exists-check passed but DB rejected duplicate.
+        // Map to 409 instead of leaking 500.
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+            HttpStatus.CONFLICT, "Duplicate request: reference_id already exists");
+        pd.setType(URI.create(BASE_ERROR_URL + "duplicate-request"));
+        pd.setTitle("Duplicate Request");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("timestamp", Instant.now());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(pd);
+    }
+
+    @ExceptionHandler({OptimisticLockingFailureException.class, PessimisticLockingFailureException.class})
+    public ResponseEntity<ProblemDetail> handleLockingFailure(RuntimeException ex, HttpServletRequest request) {
+        // Retry exhausted at Facade (@Recover maps to 503 AppException first).
+        // This is a safety net for lock failures escaping elsewhere.
+        ProblemDetail pd = ProblemDetail.forStatusAndDetail(
+            HttpStatus.CONFLICT, "Concurrent modification conflict, please retry");
+        pd.setType(URI.create(BASE_ERROR_URL + "lock-conflict"));
+        pd.setTitle("Lock Conflict");
+        pd.setInstance(URI.create(request.getRequestURI()));
+        pd.setProperty("timestamp", Instant.now());
+        return ResponseEntity.status(HttpStatus.CONFLICT).body(pd);
     }
 
     @ExceptionHandler(Exception.class)

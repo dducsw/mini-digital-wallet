@@ -10,9 +10,9 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
 - **Content-Type**: `application/json`
 - **Đơn vị Tiền tệ**: **USD** (minor unit = cents, $1.00 = 100 cents, số nguyên `Long`).
   - Ví dụ: `$50.00` $\rightarrow$ `5000`, `$1,000.00` $\rightarrow$ `100000`.
-- **Idempotency Header**: Các API ghi nhận tiền (`topup`, `withdraw`, `transfers`, `reversal`) yêu cầu:
-  - Header `Idempotency-Key`: Chuỗi định danh duy nhất do client sinh (UUIDv4).
-  - Hệ thống lưu trữ theo scope: `(actor_id, operation, idempotency_key)` và hash SHA-256 của request body.
+- **Idempotency Header (Phase 3, đã hiện thực)**: Các API ghi nhận tiền (`topup`, `withdraw`, `p2p`, `reversals`) nhận thêm:
+  - Header `Idempotency-Key` (không bắt buộc): scope `(actor_id, operation, idempotency_key)` + SHA-256 `request_hash` + lease 30s.
+  - Trùng key + khác payload → HTTP 422; trùng khi đang xử lý → HTTP 409; retry sau thành công → replay JSON cũ, không sinh ledger mới.
 - **Chuẩn Định Dạng Lỗi (RFC 7807 Problem Details)**:
   ```json
   {
@@ -119,7 +119,7 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
     "provider": "VISA",
     "masked_number": "**** **** **** 4242",
     "holder_name": "NGUYEN VAN A",
-    "payment_token": "tok_mock_visa_4242",
+    "payment_token": "tok_mock_visa_4242_a1b2c3d4",
     "is_default": true,
     "status": "ACTIVE",
     "created_at": "2026-09-10T12:00:00Z"
@@ -151,12 +151,13 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
 
 ### 2.2 Tạo Ví Mới (Create Wallet)
 - **Endpoint**: `POST /api/v1/wallets`
-- **Mô tả**: Mở ví thanh toán mới cho người dùng.
+- **Mô tả**: Mở ví thanh toán mới cho người dùng (`currency` và `wallet_type` không bắt buộc, mặc định `USD` / `USER`).
 - **Request Body**:
   ```json
   {
     "owner_id": "USER_987654",
-    "currency": "USD"
+    "currency": "USD",
+    "wallet_type": "USER"
   }
   ```
 - **Response (201 Created)**:
@@ -199,29 +200,27 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
 ---
 
 ### 2.4 Nạp Tiền Vào Ví Qua Thẻ (Top-up Money from Linked Card)
-- **Endpoint**: `POST /api/v1/wallets/{id}/topup`
-- **Headers**: `Idempotency-Key: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d`
-- **Mô tả**: Nạp tiền từ thẻ liên kết vào ví. Gọi Mock Payment Gateway charge token $\rightarrow$ Ghi bút toán sổ kép: DEBIT `SYS_EXTERNAL_SETTLEMENT`, CREDIT ví người dùng.
+- **Endpoint**: `POST /api/v1/transfers/topup`
+- **Headers**: `Idempotency-Key: 9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d` (không bắt buộc; dùng làm `reference_id`)
+- **Mô tả**: Nạp tiền từ thẻ liên kết vào ví. Ghi bút toán sổ kép: DEBIT `SYS_EXTERNAL_SETTLEMENT` (`00000000-0000-0000-0000-000000000001`), CREDIT ví người dùng.
 - **Request Body**:
   ```json
   {
-    "reference_id": "TOPUP_20260910_001",
-    "payment_method_id": "PM_01HX98Z001",
+    "wallet_id": "5f425555-2f70-4d56-bc5e-828049fe93c6",
+    "payment_method_id": "c3f6a2b1-aaaa-bbbb-cccc-ddeeff001122",
     "amount": 50000,
-    "description": "Nạp $50 từ thẻ Visa *4242"
+    "description": "Nạp $500 từ thẻ Visa *4242"
   }
   ```
-- **Response (200 OK)**:
+- **Response (201 Created)**:
   ```json
   {
     "transaction_id": "TX_01HX98Z999",
-    "reference_id": "TOPUP_20260910_001",
-    "wallet_id": "WAL_01HX98Z123",
-    "payment_method_id": "PM_01HX98Z001",
-    "type": "DEPOSIT",
+    "reference_id": "9b1deb4d-3b7d-4bad-9bdd-2b0d7b3dcb6d",
+    "transaction_type": "TOPUP",
     "amount": 50000,
     "currency": "USD",
-    "new_available_balance": 75000,
+    "description": "Nạp $500 từ thẻ Visa *4242",
     "created_at": "2026-09-10T12:20:00Z"
   }
   ```
@@ -229,208 +228,80 @@ Tài liệu đặc tả toàn bộ REST API giao dịch tiền tệ cho **Mini D
 ---
 
 ### 2.5 Rút Tiền Khỏi Ví Về Thẻ / Ngân Hàng (Withdraw Money to Linked Card)
-- **Endpoint**: `POST /api/v1/wallets/{id}/withdraw`
-- **Headers**: `Idempotency-Key: 1c2deb4d-4b7d-4bad-9bdd-3b0d7b3dcb7e`
-- **Mô tả**: Rút tiền từ ví về thẻ liên kết. Kiểm tra `available_balance >= amount` bằng `SELECT FOR UPDATE`. Ghi bút toán: DEBIT ví người dùng, CREDIT `SYS_EXTERNAL_SETTLEMENT` và kích hoạt Mock Gateway payout.
+- **Endpoint**: `POST /api/v1/transfers/withdraw`
+- **Headers**: `Idempotency-Key: 1c2deb4d-4b7d-4bad-9bdd-3b0d7b3dcb7e` (không bắt buộc)
+- **Mô tả**: Rút tiền từ ví về thẻ liên kết. Kiểm tra `available_balance >= amount` dưới `SELECT ... FOR UPDATE`. Ghi bút toán: DEBIT ví người dùng, CREDIT `SYS_EXTERNAL_SETTLEMENT`.
 - **Request Body**:
   ```json
   {
-    "reference_id": "WIT_20260910_002",
-    "payment_method_id": "PM_01HX98Z001",
+    "wallet_id": "5f425555-2f70-4d56-bc5e-828049fe93c6",
+    "payment_method_id": "c3f6a2b1-aaaa-bbbb-cccc-ddeeff001122",
     "amount": 20000,
-    "description": "Rút $20 về thẻ Visa *4242"
+    "description": "Rút $200 về thẻ Visa *4242"
   }
   ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "transaction_id": "TX_01HX98Z888",
-    "reference_id": "WIT_20260910_002",
-    "wallet_id": "WAL_01HX98Z123",
-    "payment_method_id": "PM_01HX98Z001",
-    "type": "WITHDRAWAL",
-    "amount": 20000,
-    "currency": "USD",
-    "new_available_balance": 55000,
-    "created_at": "2026-09-10T12:25:00Z"
-  }
-  ```
-- **Response (400 Bad Request)**: Nếu số dư khả dụng không đủ.
+- **Response (201 Created)**: cùng cấu trúc `TransferResponse` với `"transaction_type": "WITHDRAW"`.
+- **Response (400 Bad Request)**: Nếu số dư khả dụng không đủ (`insufficient-funds`); **403** nếu thẻ không thuộc về chủ ví.
 
 ---
 
-### 2.5 Chuyển Tiền P2P Ví $\rightarrow$ Ví (Double-Entry Transfer)
-- **Endpoint**: `POST /api/v1/transfers`
-- **Headers**: `Idempotency-Key: 7a8deb4d-5b7d-4bad-9bdd-4b0d7b3dcb8f`
+### 2.6 Chuyển Tiền P2P Ví $\rightarrow$ Ví (Double-Entry Transfer)
+- **Endpoint**: `POST /api/v1/transfers/p2p`
+- **Headers**: `Idempotency-Key: 7a8deb4d-5b7d-4bad-9bdd-4b0d7b3dcb8f` (không bắt buộc)
 - **Mô tả**: Chuyển tiền giữa 2 ví:
   - Khóa theo thứ tự `min(source, target) -> max(source, target)` chống deadlock.
-  - Bọc Spring `@Retryable` ngoài ranh giới transaction xử lý lỗi `40P01`.
-  - Ghi bản ghi cha `ledger_transactions` và 2 dòng `ledger_entries` (DEBIT nguồn, CREDIT đích) trong 1 database transaction duy nhất.
+  - Bọc Spring `@Retryable` (tầng `LedgerFacade`, ngoài ranh giới `@Transactional`) cho các lỗi khóa transient (`CannotAcquireLockException`, `PessimisticLockingFailureException`, `DeadlockLoserDataAccessException`, `ConcurrencyFailureException`).
+  - Ghi 1 bản ghi `ledger_transactions` và 2 dòng `ledger_entries` (DEBIT nguồn `line_no=1`, CREDIT đích `line_no=2`, `UNIQUE(transaction_id, line_no)`) trong 1 database transaction duy nhất.
 - **Request Body**:
   ```json
   {
-    "reference_id": "P2P_20260910_777",
-    "source_wallet_id": "WAL_01HX98Z123",
-    "target_wallet_id": "WAL_01HX99B456",
+    "source_wallet_id": "5f425555-2f70-4d56-bc5e-828049fe93c6",
+    "destination_wallet_id": "7f425555-2f70-4d56-bc5e-828049fe93c7",
     "amount": 15000,
     "description": "Chuyển tiền ăn trưa"
   }
   ```
-- **Response (200 OK)**:
+- **Response (201 Created)**:
   ```json
   {
     "transaction_id": "TX_01HX98Z777",
-    "reference_id": "P2P_20260910_777",
-    "source_wallet_id": "WAL_01HX98Z123",
-    "target_wallet_id": "WAL_01HX99B456",
+    "reference_id": "7a8deb4d-5b7d-4bad-9bdd-4b0d7b3dcb8f",
+    "transaction_type": "P2P_TRANSFER",
     "amount": 15000,
     "currency": "USD",
-    "status": "POSTED",
-    "executed_at": "2026-09-10T12:30:00Z"
+    "description": "Chuyển tiền ăn trưa",
+    "created_at": "2026-09-10T12:30:00Z"
   }
   ```
 
 ---
 
-### 2.6 Giao Dịch Hoàn Tiền (Reversal Transaction)
-- **Endpoint**: `POST /api/v1/transfers/{transaction_id}/reversal`
-- **Headers**: `Idempotency-Key: 3f4deb4d-6b7d-4bad-9bdd-5b0d7b3dcb90`
-- **Mô tả**: Tạo bút toán hoàn tiền append-only đảo ngược giao dịch gốc. Không sửa đổi dữ liệu cũ trong quá khứ.
+### 2.7 Giao Dịch Hoàn Tiền (Reversal Transaction)
+- **Endpoint**: `POST /api/v1/transfers/reversals`
+- **Headers**: `Idempotency-Key: 3f4deb4d-6b7d-4bad-9bdd-5b0d7b3dcb90` (không bắt buộc)
+- **Mô tả**: Tạo bút toán hoàn tiền append-only đảo ngược giao dịch gốc (debit ví đích gốc, credit lại ví nguồn gốc). Không sửa đổi dữ liệu cũ. Từ chối đảo ngược một giao dịch `REVERSAL`, và từ chối đảo ngược lần 2 (HTTP 409).
 - **Request Body**:
   ```json
   {
-    "reference_id": "REV_20260910_001",
-    "reason": "Hoàn tiền do chuyển nhầm"
+    "original_transaction_id": "TX_01HX98Z777",
+    "description": "Hoàn tiền do chuyển nhầm"
   }
   ```
-- **Response (200 OK)**:
-  ```json
-  {
-    "transaction_id": "TX_01HX98Z666",
-    "reference_id": "REV_20260910_001",
-    "reversal_of_transaction_id": "TX_01HX98Z777",
-    "type": "REVERSAL",
-    "status": "POSTED",
-    "executed_at": "2026-09-10T12:35:00Z"
-  }
-  ```
+- **Response (201 Created)**: cùng cấu trúc `TransferResponse` với `"transaction_type": "REVERSAL"`.
 
 ---
 
-### 2.7 Sao Kê & Lịch Sử Giao Dịch (Wallet Statement)
-- **Endpoint**: `GET /api/v1/wallets/{id}/entries?page=0&size=20`
-- **Mô tả**: Tra cứu lịch sử các dòng bút toán sổ cái (`ledger_entries`) của ví theo thứ tự thời gian mới nhất.
-- **Response (200 OK)**:
-  ```json
-  {
-    "wallet_id": "WAL_01HX98Z123",
-    "page": 0,
-    "size": 20,
-    "total_elements": 3,
-    "items": [
-      {
-        "id": "ENT_003",
-        "transaction_id": "TX_01HX98Z777",
-        "entry_type": "DEBIT",
-        "amount": 15000,
-        "line_no": 1,
-        "created_at": "2026-09-10T12:30:00Z"
-      },
-      {
-        "id": "ENT_002",
-        "transaction_id": "TX_01HX98Z888",
-        "entry_type": "DEBIT",
-        "amount": 20000,
-        "line_no": 1,
-        "created_at": "2026-09-10T12:25:00Z"
-      },
-      {
-        "id": "ENT_001",
-        "transaction_id": "TX_01HX98Z999",
-        "entry_type": "CREDIT",
-        "amount": 50000,
-        "line_no": 2,
-        "created_at": "2026-09-10T12:20:00Z"
-      }
-    ]
-  }
-  ```
+### 2.8 Tra Cứu Giao Dịch & Sao Kê Ví (Ledger Reads)
+- **Chi tiết giao dịch**: `GET /api/v1/ledger/transactions/{id}`
+- **Tra cứu theo reference**: `GET /api/v1/ledger/transactions/reference/{referenceId}`
+- **Sao kê ví**: `GET /api/v1/ledger/wallets/{walletId}/entries` — danh sách `ledger_entries` mới nhất trước, mỗi dòng gồm `wallet_id`, `entry_type`, `amount`, `line_no`, `balance_after`, `created_at`.
+- **Số dư tức thời O(1)**: `GET /api/v1/wallets/{id}` hoặc `GET /api/v1/wallets/{id}/balance`.
 
 ---
 
-## 3. Đặc Tả gRPC Contract (`ledger.proto`)
+## 3. Ngoài Phạm Vi Hiện Tại (Chưa Hiện Thực)
 
-Cổng gRPC nội bộ phục vụ các service khác (Payment Gateway, Fraud Service) gọi đồng bộ với độ trễ < 5ms:
-
-```protobuf
-syntax = "proto3";
-
-package com.minidigitalwallet.v1;
-
-option java_multiple_files = true;
-option java_package = "com.minidigitalwallet.v1";
-option java_outer_classname = "LedgerProto";
-
-service WalletGrpcService {
-  // Tra cứu ví tức thời
-  rpc GetWallet(GetWalletRequest) returns (WalletResponse);
-
-  // Nạp tiền vào ví
-  rpc Topup(TopupRequest) returns (TransactionResponse);
-
-  // Rút tiền khỏi ví
-  rpc Withdraw(WithdrawRequest) returns (TransactionResponse);
-
-  // Chuyển khoản Double-Entry P2P
-  rpc Transfer(TransferRequest) returns (TransactionResponse);
-}
-
-message GetWalletRequest {
-  string wallet_id = 1;
-}
-
-message WalletResponse {
-  string id = 1;
-  string owner_id = 2;
-  int64 available_balance = 3;
-  int64 ledger_balance = 4;
-  string currency = 5;
-  string account_status = 6;
-  int32 version = 7;
-  int64 created_at = 8;
-  int64 updated_at = 9;
-}
-
-message TopupRequest {
-  string reference_id = 1;
-  string wallet_id = 2;
-  int64 amount = 3;
-  string description = 4;
-  string payment_method_id = 5;
-}
-
-message WithdrawRequest {
-  string reference_id = 1;
-  string wallet_id = 2;
-  int64 amount = 3;
-  string description = 4;
-  string payment_method_id = 5;
-}
-
-message TransferRequest {
-  string reference_id = 1;
-  string source_wallet_id = 2;
-  string target_wallet_id = 3;
-  int64 amount = 4;
-  string currency = 5;
-  string description = 6;
-}
-
-message TransactionResponse {
-  bool success = 1;
-  string message = 2;
-  string transaction_id = 3;
-  string reference_id = 4;
-  int64 executed_at = 5;
-}
-```
+- **gRPC nội bộ** (`ledger.proto`, port 9090): đã loại khỏi codebase để giữ service tối giản; nếu cần sẽ bổ sung lại ở phase sau.
+- **Scoped Idempotency** `(actor_id, operation, key)` + lease: đã hiện thực ở Phase 3 (mục 1).
+- **Transactional Outbox / Kafka**: phạm vi Phase 4.
+- **Reconciliation job định kỳ**: phạm vi Phase 5.

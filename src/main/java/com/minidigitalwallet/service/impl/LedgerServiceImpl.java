@@ -7,13 +7,13 @@ import com.minidigitalwallet.entity.enums.EntryType;
 import com.minidigitalwallet.entity.enums.TransactionType;
 import com.minidigitalwallet.exception.AppException;
 import com.minidigitalwallet.exception.DuplicateRequestException;
-import com.minidigitalwallet.exception.WalletFrozenException;
 import com.minidigitalwallet.exception.WalletNotFoundException;
 import com.minidigitalwallet.repository.LedgerTransactionRepository;
 import com.minidigitalwallet.repository.WalletRepository;
 import com.minidigitalwallet.service.LedgerService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
+import org.springframework.dao.DataIntegrityViolationException;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
@@ -40,6 +40,51 @@ public class LedgerServiceImpl implements LedgerService {
         TransactionType transactionType,
         String description
     ) {
+        return doTransfer(referenceId, sourceWalletId, destinationWalletId, amount, transactionType, description, null);
+    }
+
+    /**
+     * Single-write core: both normal transfers and reversals funnel here so a
+     * REVERSAL is persisted once with reversalOf preset (no self-invocation,
+     * no second UPDATE after INSERT).
+     */
+    private LedgerTransaction doTransfer(
+        String referenceId,
+        UUID sourceWalletId,
+        UUID destinationWalletId,
+        Long amount,
+        TransactionType transactionType,
+        String description,
+        UUID reversalOfTransactionId
+    ) {
+        validateTransferRequest(referenceId, sourceWalletId, destinationWalletId, amount);
+
+        Wallets locked = lockBothWallets(sourceWalletId, destinationWalletId);
+        validateSameCurrency(locked.source(), locked.destination());
+
+        com.minidigitalwallet.domain.model.Money transferMoney = com.minidigitalwallet.domain.model.Money.of(amount, locked.source().getCurrency());
+        locked.source().debit(transferMoney);
+        locked.destination().credit(transferMoney);
+        walletRepository.save(locked.source());
+        walletRepository.save(locked.destination());
+
+        LedgerTransaction tx = buildBalancedTransaction(
+            referenceId, locked.source(), locked.destination(), amount, transactionType, description);
+        tx.setReversalOfTransactionId(reversalOfTransactionId);
+
+        try {
+            LedgerTransaction savedTx = transactionRepository.save(tx);
+            log.info("Ledger transaction executed: ref={}, type={}, amount={}, src={}, dst={}",
+                referenceId, transactionType, amount, sourceWalletId, destinationWalletId);
+            return savedTx;
+        } catch (DataIntegrityViolationException e) {
+            // Fast-fail exists-check above can still lose a race between two threads;
+            // the DB UNIQUE(reference_id) is the final arbiter -> 409, not 500.
+            throw new DuplicateRequestException("Transaction reference already exists: " + referenceId);
+        }
+    }
+
+    private void validateTransferRequest(String referenceId, UUID sourceWalletId, UUID destinationWalletId, Long amount) {
         if (amount == null || amount <= 0) {
             throw new AppException("Transfer amount must be positive", HttpStatus.BAD_REQUEST, "invalid-amount");
         }
@@ -49,81 +94,130 @@ public class LedgerServiceImpl implements LedgerService {
         if (transactionRepository.existsByReferenceId(referenceId)) {
             throw new DuplicateRequestException("Transaction reference already exists: " + referenceId);
         }
+    }
 
-        // Deterministic Lock Ordering: sort UUIDs lexicographically to eliminate circular wait deadlocks
-        UUID firstLockId = sourceWalletId.compareTo(destinationWalletId) < 0 ? sourceWalletId : destinationWalletId;
-        UUID secondLockId = sourceWalletId.compareTo(destinationWalletId) < 0 ? destinationWalletId : sourceWalletId;
+    /** Locks both wallets in deterministic min -> max UUID order to break deadlock cycles. */
+    private Wallets lockBothWallets(UUID sourceWalletId, UUID destinationWalletId) {
+        UUID firstId = sourceWalletId.compareTo(destinationWalletId) < 0 ? sourceWalletId : destinationWalletId;
+        UUID secondId = firstId.equals(sourceWalletId) ? destinationWalletId : sourceWalletId;
 
-        Wallet firstWallet = walletRepository.findByIdForUpdate(firstLockId)
-            .orElseThrow(() -> new WalletNotFoundException(firstLockId));
-        Wallet secondWallet = walletRepository.findByIdForUpdate(secondLockId)
-            .orElseThrow(() -> new WalletNotFoundException(secondLockId));
+        Wallet first = walletRepository.findByIdForUpdate(firstId)
+            .orElseThrow(() -> new WalletNotFoundException(firstId));
+        Wallet second = walletRepository.findByIdForUpdate(secondId)
+            .orElseThrow(() -> new WalletNotFoundException(secondId));
 
-        Wallet sourceWallet = firstWallet.getId().equals(sourceWalletId) ? firstWallet : secondWallet;
-        Wallet destWallet = firstWallet.getId().equals(destinationWalletId) ? firstWallet : secondWallet;
+        return firstId.equals(sourceWalletId)
+            ? new Wallets(first, second)
+            : new Wallets(second, first);
+    }
 
-        // Verify status
-        if (sourceWallet.isFrozen()) {
-            throw new WalletFrozenException(sourceWallet.getId());
-        }
-        if (sourceWallet.isClosed()) {
-            throw new AppException("Source wallet is CLOSED", HttpStatus.BAD_REQUEST, "wallet-closed");
-        }
-        if (destWallet.isFrozen()) {
-            throw new AppException("Destination wallet is FROZEN", HttpStatus.BAD_REQUEST, "wallet-frozen");
-        }
-        if (destWallet.isClosed()) {
-            throw new AppException("Destination wallet is CLOSED", HttpStatus.BAD_REQUEST, "wallet-closed");
-        }
-
-        // Currency verification
-        if (!Objects.equals(sourceWallet.getCurrency(), destWallet.getCurrency())) {
+    // Trạng thái FROZEN/CLOSED do WalletState ép khi debit/credit (single source of truth);
+    // ở đây chỉ còn check tiền tệ vì state không biết currency của ví đối ứng.
+    private void validateSameCurrency(Wallet source, Wallet destination) {
+        if (!Objects.equals(source.getCurrency(), destination.getCurrency())) {
             throw new AppException(
-                "Currency mismatch: source " + sourceWallet.getCurrency() + " vs dest " + destWallet.getCurrency(),
+                "Currency mismatch: source " + source.getCurrency() + " vs dest " + destination.getCurrency(),
                 HttpStatus.BAD_REQUEST,
                 "currency-mismatch"
             );
         }
+    }
 
-        // Update balances (debit validates sufficient funds for USER wallets)
-        sourceWallet.debit(amount);
-        destWallet.credit(amount);
-
-        walletRepository.save(sourceWallet);
-        walletRepository.save(destWallet);
-
-        // Build Journal Header
+    /** Builds the journal header plus its two balanced lines (DEBIT source, CREDIT dest). */
+    private LedgerTransaction buildBalancedTransaction(
+        String referenceId, Wallet source, Wallet destination,
+        Long amount, TransactionType type, String description
+    ) {
         LedgerTransaction tx = LedgerTransaction.builder()
             .referenceId(referenceId)
-            .transactionType(transactionType)
+            .transactionType(type)
             .amount(amount)
-            .currency(sourceWallet.getCurrency())
+            .currency(source.getCurrency())
             .description(description)
             .build();
 
-        // Build Journal Lines (Double-Entry Bookkeeping)
-        LedgerEntry debitEntry = LedgerEntry.builder()
-            .walletId(sourceWallet.getId())
+        tx.addEntry(LedgerEntry.builder()
+            .walletId(source.getId())
             .entryType(EntryType.DEBIT)
             .amount(amount)
-            .balanceAfter(sourceWallet.getAvailableBalance())
-            .build();
-
-        LedgerEntry creditEntry = LedgerEntry.builder()
-            .walletId(destWallet.getId())
+            .lineNo(1)
+            .balanceAfter(source.getAvailableBalance())
+            .build());
+        tx.addEntry(LedgerEntry.builder()
+            .walletId(destination.getId())
             .entryType(EntryType.CREDIT)
             .amount(amount)
-            .balanceAfter(destWallet.getAvailableBalance())
-            .build();
+            .lineNo(2)
+            .balanceAfter(destination.getAvailableBalance())
+            .build());
+        return tx;
+    }
 
-        tx.addEntry(debitEntry);
-        tx.addEntry(creditEntry);
+    private record Wallets(Wallet source, Wallet destination) {
+    }
 
-        LedgerTransaction savedTx = transactionRepository.save(tx);
-        log.info("Ledger transaction executed: ref={}, type={}, amount={}, src={}, dst={}",
-            referenceId, transactionType, amount, sourceWalletId, destinationWalletId);
+    private record WalletIds(UUID sourceId, UUID destinationId) {
+    }
 
-        return savedTx;
+    @Override
+    @Transactional(isolation = Isolation.READ_COMMITTED)
+    public LedgerTransaction reverseTransfer(
+        UUID originalTransactionId,
+        String reversalReferenceId,
+        String description
+    ) {
+        LedgerTransaction original = transactionRepository.findById(originalTransactionId)
+            .orElseThrow(() -> new AppException(
+                "Original transaction not found: " + originalTransactionId,
+                HttpStatus.NOT_FOUND, "transaction-not-found"));
+        validateReversible(original);
+
+        // Mirror the money flow: debit the original destination, credit the original source.
+        // Single save inside doTransfer with reversalOf preset (append-only, no UPDATE).
+        WalletIds counterparties = extractCounterpartyIds(original);
+        try {
+            return doTransfer(
+                reversalReferenceId,
+                counterparties.destinationId(),
+                counterparties.sourceId(),
+                original.getAmount(),
+                TransactionType.REVERSAL,
+                description != null ? description : "Reversal of " + original.getReferenceId(),
+                originalTransactionId
+            );
+        } catch (DuplicateRequestException e) {
+            throw new DuplicateRequestException(
+                "Reversal reference already exists: " + reversalReferenceId);
+        }
+    }
+
+    private void validateReversible(LedgerTransaction original) {
+        if (original.getTransactionType() == TransactionType.REVERSAL) {
+            throw new AppException("Cannot reverse a REVERSAL transaction",
+                HttpStatus.BAD_REQUEST, "reversal-of-reversal-not-allowed");
+        }
+        if (transactionRepository.existsByReversalOfTransactionId(original.getId())) {
+            throw new DuplicateRequestException(
+                "Transaction already reversed: " + original.getId());
+        }
+    }
+
+    /** Reads back the original DEBIT (source) and CREDIT (destination) wallet IDs. */
+    private WalletIds extractCounterpartyIds(LedgerTransaction original) {
+        UUID sourceId = null;
+        UUID destinationId = null;
+        for (LedgerEntry entry : original.getEntries()) {
+            if (entry.getEntryType() == EntryType.DEBIT) {
+                sourceId = entry.getWalletId();
+            } else if (entry.getEntryType() == EntryType.CREDIT) {
+                destinationId = entry.getWalletId();
+            }
+        }
+        if (sourceId == null || destinationId == null) {
+            throw new AppException("Original transaction has unbalanced entries, cannot reverse",
+                HttpStatus.CONFLICT, "unbalanced-original-transaction");
+        }
+        return new WalletIds(sourceId, destinationId);
     }
 
     @Override

@@ -8,7 +8,9 @@ import java.time.Instant;
 import java.util.UUID;
 
 @Entity
-@Table(name = "ledger_entries")
+@Table(name = "ledger_entries", uniqueConstraints = {
+    @UniqueConstraint(name = "uq_ledger_entries_tx_line", columnNames = {"transaction_id", "line_no"})
+})
 @Getter
 @Setter
 @NoArgsConstructor
@@ -35,8 +37,10 @@ public class LedgerEntry {
     @Column(name = "amount", nullable = false)
     private Long amount;
 
-    @Column(name = "balance_after", nullable = false)
-    private Long balanceAfter;
+    @Column(name = "line_no", nullable = false)
+    private Integer lineNo;
+
+    @Column(name = "balance_after", nullable = false)    private Long balanceAfter;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
