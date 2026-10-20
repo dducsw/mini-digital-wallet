@@ -33,7 +33,8 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
                 UUID userId = tokenProvider.getUserIdFromToken(jwt);
                 String username = tokenProvider.getUsernameFromToken(jwt);
 
-                UserPrincipal principal = UserPrincipal.create(userId, username);
+                UserPrincipal principal = UserPrincipal.create(
+                    userId, username, tokenProvider.getRoleFromToken(jwt));
                 UsernamePasswordAuthenticationToken authentication =
                         new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
                 authentication.setDetails(new WebAuthenticationDetailsSource().buildDetails(request));
@@ -42,6 +43,7 @@ public class JwtAuthenticationFilter extends OncePerRequestFilter {
             }
         } catch (Exception ex) {
             log.error("Could not set user authentication in security context", ex);
+            SecurityContextHolder.clearContext();
         }
 
         filterChain.doFilter(request, response);

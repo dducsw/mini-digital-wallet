@@ -1,23 +1,27 @@
 import React, { useState, useEffect, useCallback, useRef } from 'react';
-import { ArrowRightLeft, CreditCard, History } from 'lucide-react';
-import { api, isUnauthorized } from './services/api';
-import { formatCentsToUSD } from './utils/formatters';
+import { api, isUnauthorized, generateIdempotencyKey } from './services/api';
+import { formatCentsToUSD, readErrorMessage } from './utils/formatters';
 
-// Common & Layout
+// Pages
+import AuthPage from './components/auth/AuthPage';
 import Toast from './components/common/Toast';
 import Navbar from './components/layout/Navbar';
-
-// Views & Tabs
-import AuthPage from './components/auth/AuthPage';
-import WalletCard from './components/wallet/WalletCard';
-import TransfersTab from './components/transfers/TransfersTab';
-import PaymentMethodsTab from './components/cards/PaymentMethodsTab';
-import LedgerTab from './components/ledger/LedgerTab';
+import Dashboard from './components/dashboard/Dashboard';
+import TransferPage from './components/transfers/TransferPage';
+import TopUpPage from './components/transfers/TopUpPage';
+import WithdrawPage from './components/transfers/WithdrawPage';
+import CardsPage from './components/cards/CardsPage';
+import HistoryPage from './components/ledger/HistoryPage';
+import ContactsPage from './components/contacts/ContactsPage';
 
 // Modals
 import ProfileModal from './components/modals/ProfileModal';
 import LinkCardModal from './components/modals/LinkCardModal';
-import CreateWalletModal from './components/modals/CreateWalletModal';
+
+const toCents = (amount) => {
+  const cents = Math.round(parseFloat(amount) * 100);
+  return Number.isFinite(cents) ? cents : 0;
+};
 
 export default function App() {
   // Authentication State
@@ -25,33 +29,40 @@ export default function App() {
   const [currentUser, setCurrentUser] = useState(() => {
     try {
       const saved = localStorage.getItem('wallet_user');
-      if (!saved) return null;
-      const parsed = JSON.parse(saved);
-      if (parsed && parsed.fullName) {
-        parsed.fullName = parsed.fullName.replace(/\s*\(.*?\)/g, '').trim();
-      }
-      return parsed;
+      return saved ? JSON.parse(saved) : null;
     } catch {
       return null;
     }
   });
 
-  // UI State
+  // UI State: feature pages opened from dashboard tiles
+  const [activePage, setActivePage] = useState('dashboard');
+  // P2P page can be opened with a prefilled recipient (from contacts "pick").
+  const [transferPrefill, setTransferPrefill] = useState('');
   const [showDropdown, setShowDropdown] = useState(false);
   const [showProfileModal, setShowProfileModal] = useState(false);
   const [showLinkCardModal, setShowLinkCardModal] = useState(false);
-  const [showCreateWalletModal, setShowCreateWalletModal] = useState(false);
-  const [activeTab, setActiveTab] = useState('transfers'); // 'transfers' | 'cards' | 'ledger'
   const [toast, setToast] = useState(null);
   const [copied, setCopied] = useState(false);
 
   // Business Data
   const [wallet, setWallet] = useState(null);
   const [paymentMethods, setPaymentMethods] = useState([]);
-  const [ledgerEntries, setLedgerEntries] = useState([]);
+  const [contacts, setContacts] = useState([]);
 
   const toastTimer = useRef(null);
   const copiedTimer = useRef(null);
+
+  // Idempotency keys: one key per money action, kept until a confirmed
+  // response arrives so a retry reuses it instead of double-charging.
+  const pendingKeys = useRef({});
+  const takeKey = (action) => {
+    if (!pendingKeys.current[action]) pendingKeys.current[action] = generateIdempotencyKey();
+    return pendingKeys.current[action];
+  };
+  const consumeKey = (action) => {
+    delete pendingKeys.current[action];
+  };
 
   useEffect(() => {
     return () => {
@@ -66,19 +77,54 @@ export default function App() {
     toastTimer.current = setTimeout(() => setToast(null), 4000);
   }, []);
 
-  // 401 = missing/invalid/expired JWT (or a demo token the backend rejects).
-  // Drop the dead session so the user lands back on login with a clear message
-  // instead of staring at an empty dashboard.
-  const handleSessionExpired = useCallback(() => {
+  // 401 = missing/invalid/expired JWT. Try one silent refresh (rotation)
+  // before dropping the session, so short-lived access tokens don't kick
+  // the user out. Refresh reuse/miss -> clear everything (fail-closed).
+  const refreshing = useRef(false);
+  const handleSessionExpired = useCallback(async () => {
+    if (refreshing.current) return;
+    refreshing.current = true;
+    try {
+      const storedRefresh = localStorage.getItem('wallet_refresh');
+      if (storedRefresh) {
+        const res = await api.refresh(storedRefresh);
+        if (res.ok) {
+          const data = await res.json();
+          setToken(data.accessToken);
+          localStorage.setItem('wallet_token', data.accessToken);
+          if (data.refreshToken) {
+            localStorage.setItem('wallet_refresh', data.refreshToken);
+          }
+          return;
+        }
+      }
+    } catch {
+      // fall through to clear
+    } finally {
+      refreshing.current = false;
+    }
     setToken(null);
     setCurrentUser(null);
     setWallet(null);
     setPaymentMethods([]);
-    setLedgerEntries([]);
+    setContacts([]);
     localStorage.removeItem('wallet_token');
+    localStorage.removeItem('wallet_refresh');
     localStorage.removeItem('wallet_user');
     showToast('error', 'Session invalid or expired. Please sign in again.');
   }, [showToast]);
+
+  const clearSession = () => {
+    setToken(null);
+    setCurrentUser(null);
+    setWallet(null);
+    setPaymentMethods([]);
+    setContacts([]);
+    setActivePage('dashboard');
+    localStorage.removeItem('wallet_token');
+    localStorage.removeItem('wallet_refresh');
+    localStorage.removeItem('wallet_user');
+  };
 
   const copyWalletId = (id) => {
     if (!id || !navigator.clipboard) return;
@@ -88,106 +134,45 @@ export default function App() {
     copiedTimer.current = setTimeout(() => setCopied(false), 2000);
   };
 
-  // Load Wallet Data
+  // Central navigation: navigating anywhere except transfer clears a stale prefill.
+  const navigate = (page) => {
+    if (page !== 'transfer') setTransferPrefill('');
+    setActivePage(page);
+  };
+
+  const openTransferWith = (accountNumber) => {
+    setTransferPrefill(accountNumber);
+    setActivePage('transfer');
+  };
+
+  // Load Wallet Data (wallet, cards, contacts). Statement pages fetch on demand.
   const loadData = useCallback(async () => {
     if (!currentUser) return;
     const ownerId = currentUser.userId || currentUser.username || 'USER_DEMO';
 
     try {
-      let activeWallet = null;
-
-      // 1. Fetch Wallets
       const walletRes = await api.getWallets(ownerId, token);
       if (isUnauthorized(walletRes)) {
         handleSessionExpired();
         return;
       }
-      if (walletRes.ok) {
-        const wallets = await walletRes.json();
-        if (wallets && wallets.length > 0) {
-          activeWallet = wallets[0];
-          setWallet(activeWallet);
-        } else {
-          setWallet(null);
-        }
-      } else {
-        setWallet(null);
-      }
+      setWallet(walletRes.ok ? (await walletRes.json())[0] ?? null : null);
 
-      // 2. Fetch Payment Methods
       const pmRes = await api.getPaymentMethods(ownerId, token);
       if (isUnauthorized(pmRes)) {
         handleSessionExpired();
         return;
       }
-      if (pmRes.ok) {
-        const pms = await pmRes.json();
-        setPaymentMethods(pms);
-      } else {
-        setPaymentMethods([]);
-      }
+      setPaymentMethods(pmRes.ok ? await pmRes.json() : []);
 
-      // 3. Fetch Ledger Entries
-      if (activeWallet && activeWallet.id) {
-        const entriesRes = await api.getLedgerEntries(activeWallet.id, token);
-        if (isUnauthorized(entriesRes)) {
-          handleSessionExpired();
-          return;
-        }
-        if (entriesRes.ok) {
-          const entries = await entriesRes.json();
-          setLedgerEntries(entries);
-        } else {
-          setLedgerEntries([]);
-        }
+      const contactsRes = await api.getContacts(token);
+      if (isUnauthorized(contactsRes)) {
+        handleSessionExpired();
+        return;
       }
+      setContacts(contactsRes.ok ? await contactsRes.json() : []);
     } catch {
-      // Offline fallback mock data
-      const fallbackWallet = {
-        id: '0191fa30-9b48-732a-bc91-23588921a100',
-        owner_id: ownerId,
-        account_type: 'USER',
-        status: 'ACTIVE',
-        available_balance: 145000,
-        ledger_balance: 145000,
-        currency: 'USD',
-        version: 1,
-      };
-      setWallet(fallbackWallet);
-
-      const fallbackPms = [
-        {
-          id: 'pm-01-mock',
-          method_type: 'DEBIT_CARD',
-          provider: 'VISA',
-          masked_number: '•••• •••• •••• 4242',
-          holder_name: currentUser.fullName || currentUser.username || 'ALICE TRAN',
-          is_default: true,
-          status: 'ACTIVE',
-        },
-      ];
-      setPaymentMethods(fallbackPms);
-
-      setLedgerEntries([
-        {
-          id: 'entry-01',
-          wallet_id: fallbackWallet.id,
-          entry_type: 'CREDIT',
-          amount: 100000,
-          line_no: 1,
-          balance_after: 100000,
-          created_at: new Date(Date.now() - 7200000).toISOString(),
-        },
-        {
-          id: 'entry-02',
-          wallet_id: fallbackWallet.id,
-          entry_type: 'CREDIT',
-          amount: 45000,
-          line_no: 2,
-          balance_after: 145000,
-          created_at: new Date().toISOString(),
-        },
-      ]);
+      showToast('error', 'Failed to load data. Please check your connection.');
     }
   }, [currentUser, token, handleSessionExpired]);
 
@@ -197,40 +182,47 @@ export default function App() {
     }
   }, [currentUser, loadData]);
 
+  // Fetch the real fullName (AuthResponse doesn't carry it).
+  const loadCurrentUser = async (accessToken, fallbackName) => {
+    let fullName = fallbackName;
+    try {
+      const meRes = await api.me(accessToken);
+      if (meRes.ok) {
+        const me = await meRes.json();
+        if (me.fullName) fullName = me.fullName;
+      }
+    } catch {
+      // fullName stays as fallback username
+    }
+    return fullName;
+  };
+
   // Auth Handlers
   const handleLogin = async (username, password) => {
     try {
       const res = await api.login(username, password);
       if (res.ok) {
         const data = await res.json();
-        setToken(data.accessToken);
+        const fullName = await loadCurrentUser(data.accessToken, data.username);
         const userData = {
           userId: data.userId,
           username: data.username,
           email: data.email,
-          fullName: data.username,
+          fullName,
         };
+        setToken(data.accessToken);
         setCurrentUser(userData);
         localStorage.setItem('wallet_token', data.accessToken);
         localStorage.setItem('wallet_user', JSON.stringify(userData));
+        if (data.refreshToken) {
+          localStorage.setItem('wallet_refresh', data.refreshToken);
+        }
         showToast('success', `Welcome back, ${data.username}!`);
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Invalid username or password');
+        showToast('error', await readErrorMessage(res, 'Invalid username or password'));
       }
     } catch {
-      const demoUser = {
-        userId: 'USER_' + username.toUpperCase(),
-        username,
-        email: `${username}@example.com`,
-        fullName: username.toUpperCase(),
-      };
-      const demoToken = 'mock-jwt-token-' + Date.now();
-      setToken(demoToken);
-      setCurrentUser(demoUser);
-      localStorage.setItem('wallet_token', demoToken);
-      localStorage.setItem('wallet_user', JSON.stringify(demoUser));
-      showToast('success', `Signed in (Demo Mode): ${demoUser.username}`);
+      showToast('error', 'Login failed. Please check your connection.');
     }
   };
 
@@ -239,101 +231,65 @@ export default function App() {
       const res = await api.register(form);
       if (res.ok) {
         const data = await res.json();
-        setToken(data.accessToken);
+        const fullName = form.fullName || data.username;
         const userData = {
           userId: data.userId,
           username: data.username,
           email: data.email,
-          fullName: form.fullName || data.username,
+          fullName,
         };
+        setToken(data.accessToken);
         setCurrentUser(userData);
         localStorage.setItem('wallet_token', data.accessToken);
         localStorage.setItem('wallet_user', JSON.stringify(userData));
-        showToast('success', 'Account created successfully!');
+        if (data.refreshToken) {
+          localStorage.setItem('wallet_refresh', data.refreshToken);
+        }
+        showToast('success', 'Account created! Set your 6-digit Transaction PIN in Profile to enable withdrawals/transfers.');
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Could not register account');
+        showToast('error', await readErrorMessage(res, 'Could not register account'));
       }
     } catch {
-      const demoUser = {
-        userId: 'USER_' + form.username.toUpperCase(),
-        username: form.username,
-        email: form.email,
-        fullName: form.fullName || form.username,
-      };
-      const demoToken = 'mock-jwt-token-' + Date.now();
-      setToken(demoToken);
-      setCurrentUser(demoUser);
-      localStorage.setItem('wallet_token', demoToken);
-      localStorage.setItem('wallet_user', JSON.stringify(demoUser));
-      showToast('success', 'Account created (Demo Mode)!');
+      showToast('error', 'Registration failed. Please check your connection.');
     }
   };
 
-  const handleQuickDemoLogin = (demoName) => {
-    const demoUser = {
-      userId: `USER_${demoName.toUpperCase()}`,
-      username: demoName.toLowerCase(),
-      email: `${demoName.toLowerCase()}@wallet.io`,
-      fullName: `${demoName} Tran`,
-    };
-    setToken('demo-token-' + demoName);
-    setCurrentUser(demoUser);
-    localStorage.setItem('wallet_token', 'demo-token');
-    localStorage.setItem('wallet_user', JSON.stringify(demoUser));
-    showToast('success', `Quick login as: ${demoUser.fullName}`);
-  };
-
-  const handleLogout = () => {
+  const handleLogout = async () => {
     setShowDropdown(false);
-    setToken(null);
-    setCurrentUser(null);
-    setWallet(null);
-    setPaymentMethods([]);
-    setLedgerEntries([]);
-    localStorage.removeItem('wallet_token');
-    localStorage.removeItem('wallet_user');
+    const storedRefresh = localStorage.getItem('wallet_refresh');
+    if (storedRefresh) {
+      try {
+        await api.logout(storedRefresh);
+      } catch {
+        // best-effort: session is cleared locally regardless
+      }
+    }
+    clearSession();
     showToast('success', 'Logged out successfully');
   };
 
   // Wallet Handlers
   const handleCreateWallet = async () => {
-    const ownerId = currentUser?.userId || currentUser?.username;
     try {
-      const res = await api.createWallet({ ownerId, currency: 'USD', walletType: 'USER' }, token);
+      const res = await api.createWallet(token);
       if (isUnauthorized(res)) {
         handleSessionExpired();
         return;
       }
       if (res.ok) {
-        const newWallet = await res.json();
-        setWallet(newWallet);
-        setShowCreateWalletModal(false);
+        setWallet(await res.json());
         showToast('success', 'USD Wallet created successfully!');
-        loadData();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Failed to create wallet');
+        showToast('error', await readErrorMessage(res, 'Failed to create wallet'));
       }
     } catch {
-      setWallet({
-        id: 'wal-' + Date.now(),
-        owner_id: ownerId,
-        account_type: 'USER',
-        status: 'ACTIVE',
-        available_balance: 0,
-        ledger_balance: 0,
-        currency: 'USD',
-        version: 0,
-      });
-      setShowCreateWalletModal(false);
-      showToast('success', 'Wallet created (Demo Mode)!');
+      showToast('error', 'Failed to create wallet. Please check your connection.');
     }
   };
 
   const handleToggleFreeze = async () => {
     if (!wallet) return;
-    const targetStatus = wallet.status === 'ACTIVE' ? 'FROZEN' : 'ACTIVE';
+    const targetStatus = wallet.account_status === 'ACTIVE' ? 'FROZEN' : 'ACTIVE';
     try {
       const res = await api.updateWalletStatus(wallet.id, targetStatus, token);
       if (isUnauthorized(res)) {
@@ -341,32 +297,21 @@ export default function App() {
         return;
       }
       if (res.ok) {
-        const updated = await res.json();
-        setWallet(updated);
-        showToast(
-          'success',
-          targetStatus === 'FROZEN' ? 'Wallet safely frozen' : 'Wallet reactivated'
-        );
+        setWallet(await res.json());
+        showToast('success', targetStatus === 'FROZEN' ? 'Wallet safely frozen' : 'Wallet reactivated');
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Could not change status');
+        showToast('error', await readErrorMessage(res, 'Could not change status'));
       }
     } catch {
-      setWallet((prev) => ({ ...prev, status: targetStatus }));
-      showToast(
-        'success',
-        targetStatus === 'FROZEN' ? 'Wallet frozen (Demo Mode)' : 'Wallet reactivated (Demo Mode)'
-      );
+      showToast('error', 'Failed to change wallet status.');
     }
   };
 
   // Payment Method Handlers
   const handleLinkCard = async (cardForm) => {
-    const ownerId = currentUser?.userId || currentUser?.username;
     try {
       const res = await api.linkCard(
         {
-          owner_id: ownerId,
           method_type: cardForm.method_type,
           provider: cardForm.provider,
           card_number: cardForm.card_number,
@@ -384,27 +329,15 @@ export default function App() {
         showToast('success', 'Payment card linked successfully (PCI-DSS tokenized)!');
         loadData();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Failed to link card');
+        showToast('error', await readErrorMessage(res, 'Failed to link card'));
       }
     } catch {
-      const newCard = {
-        id: 'pm-' + Date.now(),
-        method_type: cardForm.method_type,
-        provider: cardForm.provider,
-        masked_number: '•••• •••• •••• ' + cardForm.card_number.slice(-4),
-        holder_name: cardForm.holder_name.toUpperCase(),
-        is_default: cardForm.is_default,
-        status: 'ACTIVE',
-      };
-      setPaymentMethods((prev) => [newCard, ...prev]);
-      setShowLinkCardModal(false);
-      showToast('success', 'Card linked successfully (Demo Mode)');
+      showToast('error', 'Failed to link card. Please check your connection.');
     }
   };
 
   const handleRevokeCard = async (id) => {
-    if (!window.confirm('Are you sure you want to revoke this payment card?')) return;
+    if (!window.confirm('Remove this payment card?')) return;
     try {
       const res = await api.revokeCard(id, token);
       if (isUnauthorized(res)) {
@@ -415,24 +348,23 @@ export default function App() {
         showToast('success', 'Card removed successfully');
         loadData();
       } else {
-        showToast('error', 'Failed to remove card');
+        showToast('error', await readErrorMessage(res, 'Failed to remove card'));
       }
     } catch {
-      setPaymentMethods((prev) => prev.filter((item) => item.id !== id));
-      showToast('success', 'Card removed (Demo Mode)');
+      showToast('error', 'Failed to remove card. Please check your connection.');
     }
   };
 
-  // Transfer Handlers
+  // Transfer Handlers (return true on success so pages can close/redirect)
   const handleTopUp = async (amount, pmId) => {
     if (!wallet || !pmId) {
       showToast('error', 'Please link a payment card first');
-      return;
+      return false;
     }
-    const cents = Math.round(parseFloat(amount) * 100);
-    if (isNaN(cents) || cents <= 0) {
+    const cents = toCents(amount);
+    if (cents <= 0) {
       showToast('error', 'Please enter a valid amount');
-      return;
+      return false;
     }
 
     try {
@@ -441,56 +373,43 @@ export default function App() {
           walletId: wallet.id,
           paymentMethodId: pmId,
           amount: cents,
-          description: `Top-up $${amount} from card`,
+          description: `Top-up $${cents / 100} from card`,
         },
+        takeKey('topup'),
         token
       );
+      consumeKey('topup');
       if (isUnauthorized(res)) {
         handleSessionExpired();
-        return;
+        return false;
       }
       if (res.ok) {
         showToast('success', `Top-up successful: +${formatCentsToUSD(cents)}`);
         loadData();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Top-up failed');
+        return true;
       }
+      showToast('error', await readErrorMessage(res, 'Top-up failed'));
+      return false;
     } catch {
-      setWallet((prev) => ({
-        ...prev,
-        available_balance: prev.available_balance + cents,
-        ledger_balance: prev.ledger_balance + cents,
-      }));
-      setLedgerEntries((prev) => [
-        {
-          id: 'entry-' + Date.now(),
-          wallet_id: wallet.id,
-          entry_type: 'CREDIT',
-          amount: cents,
-          line_no: prev.length + 1,
-          balance_after: wallet.available_balance + cents,
-          created_at: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
-      showToast('success', `Top-up successful (Demo Mode): +${formatCentsToUSD(cents)}`);
+      // Network error: keep the key so a manual retry is idempotent.
+      showToast('error', 'Top-up failed. Please check your connection.');
+      return false;
     }
   };
 
-  const handleWithdraw = async (amount, pmId) => {
+  const handleWithdraw = async (amount, pmId, pin) => {
     if (!wallet || !pmId) {
       showToast('error', 'Please link a payment card first');
-      return;
+      return false;
     }
-    const cents = Math.round(parseFloat(amount) * 100);
-    if (isNaN(cents) || cents <= 0) {
+    const cents = toCents(amount);
+    if (cents <= 0) {
       showToast('error', 'Please enter a valid amount');
-      return;
+      return false;
     }
     if (wallet.available_balance < cents) {
       showToast('error', 'Insufficient available balance');
-      return;
+      return false;
     }
 
     try {
@@ -499,99 +418,133 @@ export default function App() {
           walletId: wallet.id,
           paymentMethodId: pmId,
           amount: cents,
-          description: `Withdraw $${amount} to card`,
+          description: `Withdraw $${cents / 100} to card`,
+          pin,
         },
+        takeKey('withdraw'),
         token
       );
+      consumeKey('withdraw');
       if (isUnauthorized(res)) {
         handleSessionExpired();
-        return;
+        return false;
       }
       if (res.ok) {
         showToast('success', `Withdrawal successful: -${formatCentsToUSD(cents)}`);
         loadData();
-      } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Withdrawal failed');
+        return true;
       }
+      showToast('error', await readErrorMessage(res, 'Withdrawal failed'));
+      return false;
     } catch {
-      setWallet((prev) => ({
-        ...prev,
-        available_balance: prev.available_balance - cents,
-        ledger_balance: prev.ledger_balance - cents,
-      }));
-      setLedgerEntries((prev) => [
-        {
-          id: 'entry-' + Date.now(),
-          wallet_id: wallet.id,
-          entry_type: 'DEBIT',
-          amount: cents,
-          line_no: prev.length + 1,
-          balance_after: wallet.available_balance - cents,
-          created_at: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
-      showToast('success', `Withdrawal successful (Demo Mode): -${formatCentsToUSD(cents)}`);
+      showToast('error', 'Withdrawal failed. Please check your connection.');
+      return false;
     }
   };
 
-  const handleP2pTransfer = async (amount, destWalletId) => {
-    if (!wallet) return;
-    if (!destWalletId.trim()) {
-      showToast('error', 'Recipient wallet ID is required');
-      return;
+  const handleP2pTransfer = async (cents, destAccountNumber, pin, nickname) => {
+    if (!wallet) return false;
+    if (!/^[0-9]{12}$/.test(destAccountNumber)) {
+      showToast('error', 'Recipient account number must be 12 digits');
+      return false;
     }
-    const cents = Math.round(parseFloat(amount) * 100);
-    if (isNaN(cents) || cents <= 0) {
+    if (cents <= 0) {
       showToast('error', 'Please enter a valid amount');
-      return;
+      return false;
     }
     if (wallet.available_balance < cents) {
       showToast('error', 'Insufficient available balance');
-      return;
+      return false;
     }
 
     try {
       const res = await api.p2pTransfer(
         {
           sourceWalletId: wallet.id,
-          destinationWalletId: destWalletId.trim(),
+          destinationAccountNumber: destAccountNumber,
           amount: cents,
-          description: `P2P transfer $${amount}`,
+          description: `P2P transfer $${cents / 100}`,
+          pin,
         },
+        takeKey('p2p'),
         token
       );
+      consumeKey('p2p');
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return false;
+      }
+      if (res.ok) {
+        showToast('success', `Transfer successful: -${formatCentsToUSD(cents)}`);
+        if (nickname) {
+          api.createContact({ accountNumber: destAccountNumber, nickname }, token)
+            .then(() => loadData())
+            .catch(() => {});
+        }
+        loadData();
+        return true;
+      }
+      showToast('error', await readErrorMessage(res, 'Transfer failed'));
+      return false;
+    } catch {
+      showToast('error', 'Transfer failed. Please check your connection.');
+      return false;
+    }
+  };
+
+  // Contacts Handlers
+  const handleAddContact = async ({ accountNumber, nickname }) => {
+    try {
+      const res = await api.createContact({ accountNumber, nickname }, token);
       if (isUnauthorized(res)) {
         handleSessionExpired();
         return;
       }
       if (res.ok) {
-        showToast('success', `Transfer successful: -${formatCentsToUSD(cents)}`);
+        showToast('success', `Saved "${nickname}" to contacts`);
         loadData();
       } else {
-        const err = await res.json().catch(() => ({}));
-        showToast('error', err.detail || 'Transfer failed');
+        showToast('error', await readErrorMessage(res, 'Failed to save contact'));
       }
     } catch {
-      setWallet((prev) => ({
-        ...prev,
-        available_balance: prev.available_balance - cents,
-        ledger_balance: prev.ledger_balance - cents,
-      }));
-      setLedgerEntries((prev) => [
-        {
-          id: 'entry-' + Date.now(),
-          wallet_id: wallet.id,
-          entry_type: 'DEBIT',
-          amount: cents,
-          line_no: prev.length + 1,
-          balance_after: wallet.available_balance - cents,
-          created_at: new Date().toISOString(),
-        },
-        ...prev,
-      ]);
-      showToast('success', `Transfer successful (Demo Mode): -${formatCentsToUSD(cents)}`);
+      showToast('error', 'Failed to save contact. Please check your connection.');
+    }
+  };
+
+  const handleDeleteContact = async (id, nickname) => {
+    if (!window.confirm(`Remove "${nickname}" from contacts?`)) return;
+    try {
+      const res = await api.deleteContact(id, token);
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
+      if (res.ok || res.status === 204) {
+        setContacts((prev) => prev.filter((c) => c.id !== id));
+        showToast('success', 'Contact removed');
+      } else {
+        showToast('error', await readErrorMessage(res, 'Failed to remove contact'));
+      }
+    } catch {
+      showToast('error', 'Failed to remove contact. Please check your connection.');
+    }
+  };
+
+  const handleToggleFavorite = async (id) => {
+    try {
+      const res = await api.toggleFavoriteContact(id, token);
+      if (isUnauthorized(res)) {
+        handleSessionExpired();
+        return;
+      }
+      if (res.ok) {
+        const updated = await res.json();
+        setContacts((prev) => prev.map((c) => (c.id === id ? updated : c)));
+      } else {
+        showToast('error', await readErrorMessage(res, 'Failed to update contact'));
+      }
+    } catch {
+      showToast('error', 'Failed to update contact. Please check your connection.');
     }
   };
 
@@ -601,14 +554,93 @@ export default function App() {
       <AuthPage
         onLogin={handleLogin}
         onRegister={handleRegister}
-        onQuickDemoLogin={handleQuickDemoLogin}
         toast={toast}
         onCloseToast={() => setToast(null)}
       />
     );
   }
 
-  // Render Dashboard
+  // Dashboard + feature pages
+  const renderPage = () => {
+    switch (activePage) {
+      case 'transfer':
+        return (
+          <TransferPage
+            key={transferPrefill || 'default'}
+            wallet={wallet}
+            contacts={contacts}
+            token={token}
+            prefillAccount={transferPrefill}
+            onSubmit={handleP2pTransfer}
+            onSessionExpired={handleSessionExpired}
+            onNavigate={navigate}
+          />
+        );
+      case 'topup':
+        return (
+          <TopUpPage
+            wallet={wallet}
+            paymentMethods={paymentMethods}
+            onSubmit={handleTopUp}
+            onNavigate={navigate}
+          />
+        );
+      case 'withdraw':
+        return (
+          <WithdrawPage
+            wallet={wallet}
+            paymentMethods={paymentMethods}
+            onSubmit={handleWithdraw}
+            onNavigate={navigate}
+          />
+        );
+      case 'cards':
+        return (
+          <CardsPage
+            paymentMethods={paymentMethods}
+            onOpenLinkCard={() => setShowLinkCardModal(true)}
+            onRevokeCard={handleRevokeCard}
+            onNavigate={navigate}
+          />
+        );
+      case 'history':
+        return (
+          <HistoryPage
+            wallet={wallet}
+            token={token}
+            showToast={showToast}
+            onSessionExpired={handleSessionExpired}
+            onNavigate={navigate}
+          />
+        );
+      case 'contacts':
+        return (
+          <ContactsPage
+            contacts={contacts}
+            onAdd={handleAddContact}
+            onDelete={handleDeleteContact}
+            onToggleFavorite={handleToggleFavorite}
+            onPick={openTransferWith}
+            onNavigate={navigate}
+          />
+        );
+      case 'dashboard':
+      default:
+        return (
+          <Dashboard
+            wallet={wallet}
+            paymentMethodCount={paymentMethods.length}
+            contactCount={contacts.length}
+            copied={copied}
+            onCopyId={copyWalletId}
+            onToggleFreeze={handleToggleFreeze}
+            onNavigate={navigate}
+            onCreateWallet={handleCreateWallet}
+          />
+        );
+    }
+  };
+
   return (
     <div className="app-container">
       <Navbar
@@ -617,72 +649,21 @@ export default function App() {
         setShowDropdown={setShowDropdown}
         onOpenProfile={() => setShowProfileModal(true)}
         onLogout={handleLogout}
+        onNavigateHome={() => navigate('dashboard')}
       />
 
-      <main className="main-wrapper">
+      {/* Dashboard keeps its own full-width hero layout; sub-pages center their content. */}
+      <main className={`main-wrapper${activePage === 'dashboard' ? '' : ' page-centered'}`}>
         <Toast toast={toast} onClose={() => setToast(null)} />
-
-        <WalletCard
-          wallet={wallet}
-          copied={copied}
-          onCopyId={copyWalletId}
-          onToggleFreeze={handleToggleFreeze}
-          onCreateWalletClick={() => setShowCreateWalletModal(true)}
-        />
-
-        {/* Tab Controls */}
-        <div className="app-tabs">
-          <button
-            className={`app-tab-btn ${activeTab === 'transfers' ? 'active' : ''}`}
-            onClick={() => setActiveTab('transfers')}
-          >
-            <ArrowRightLeft size={15} />
-            Transfers
-          </button>
-          <button
-            className={`app-tab-btn ${activeTab === 'cards' ? 'active' : ''}`}
-            onClick={() => setActiveTab('cards')}
-          >
-            <CreditCard size={15} />
-            Payment Methods ({paymentMethods.length})
-          </button>
-          <button
-            className={`app-tab-btn ${activeTab === 'ledger' ? 'active' : ''}`}
-            onClick={() => setActiveTab('ledger')}
-          >
-            <History size={15} />
-            History ({ledgerEntries.length})
-          </button>
-        </div>
-
-        {/* Tab Contents */}
-        {activeTab === 'transfers' && (
-          <TransfersTab
-            wallet={wallet}
-            paymentMethods={paymentMethods}
-            onTopUp={handleTopUp}
-            onWithdraw={handleWithdraw}
-            onP2pTransfer={handleP2pTransfer}
-          />
-        )}
-
-        {activeTab === 'cards' && (
-          <PaymentMethodsTab
-            paymentMethods={paymentMethods}
-            onOpenLinkCard={() => setShowLinkCardModal(true)}
-            onRevokeCard={handleRevokeCard}
-          />
-        )}
-
-        {activeTab === 'ledger' && (
-          <LedgerTab ledgerEntries={ledgerEntries} />
-        )}
+        {renderPage()}
       </main>
 
       {/* Modals */}
       {showProfileModal && (
         <ProfileModal
           currentUser={currentUser}
+          token={token}
+          showToast={showToast}
           onClose={() => setShowProfileModal(false)}
         />
       )}
@@ -691,14 +672,6 @@ export default function App() {
         <LinkCardModal
           onClose={() => setShowLinkCardModal(false)}
           onLinkCard={handleLinkCard}
-        />
-      )}
-
-      {showCreateWalletModal && (
-        <CreateWalletModal
-          currentUser={currentUser}
-          onClose={() => setShowCreateWalletModal(false)}
-          onCreateWallet={handleCreateWallet}
         />
       )}
     </div>

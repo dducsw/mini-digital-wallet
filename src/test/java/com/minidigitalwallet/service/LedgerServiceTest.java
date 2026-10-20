@@ -17,12 +17,14 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
-import org.mockito.InjectMocks;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import org.springframework.http.HttpStatus;
 
+import java.util.List;
 import java.util.Optional;
 import java.util.UUID;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.assertj.core.api.Assertions.assertThat;
 import static org.assertj.core.api.Assertions.assertThatThrownBy;
@@ -38,7 +40,10 @@ class LedgerServiceTest {
     @Mock
     private LedgerTransactionRepository transactionRepository;
 
-    @InjectMocks
+    @Mock
+    private com.minidigitalwallet.repository.LedgerEntryRepository entryRepository;
+
+    /** No guards by default; tests that care about policy build their own instance. */
     private LedgerServiceImpl ledgerService;
 
     private Wallet walletA;
@@ -46,6 +51,8 @@ class LedgerServiceTest {
 
     @BeforeEach
     void setUp() {
+        ledgerService = new LedgerServiceImpl(
+            walletRepository, transactionRepository, entryRepository, List.of());
         walletA = Wallet.builder()
             .id(UUID.fromString("11111111-1111-1111-1111-111111111111"))
             .userId("USER_A")
@@ -165,5 +172,86 @@ class LedgerServiceTest {
             TransactionType.P2P_TRANSFER,
             "Duplicate test"
         )).isInstanceOf(DuplicateRequestException.class);
+    }
+
+    @Test
+    @DisplayName("executeTransfer: LedgerGuard sees the locked source wallet and can reject before any write")
+    void executeTransfer_GuardRejectsAfterLock_NoWriteHappens() {
+        when(transactionRepository.existsByReferenceId("REF_CAPPED")).thenReturn(false);
+        when(walletRepository.findByIdForUpdate(walletA.getId())).thenReturn(Optional.of(walletA));
+        when(walletRepository.findByIdForUpdate(walletB.getId())).thenReturn(Optional.of(walletB));
+
+        AtomicReference<Wallet> debitedWallet = new AtomicReference<>();
+        LedgerGuard dailyCapGuard = (debited, type, amount) -> {
+            debitedWallet.set(debited);
+            throw new AppException("Daily debit cap exceeded", HttpStatus.FORBIDDEN, "limit-exceeded-daily");
+        };
+        LedgerServiceImpl guarded = new LedgerServiceImpl(
+            walletRepository, transactionRepository, entryRepository, List.of(dailyCapGuard));
+
+        assertThatThrownBy(() -> guarded.executeTransfer(
+            "REF_CAPPED",
+            walletA.getId(),
+            walletB.getId(),
+            3000L,
+            TransactionType.P2P_TRANSFER,
+            "Guarded transfer"
+        )).isInstanceOf(AppException.class);
+
+        // The exact locked instance (not a copy) reaches the guard, and nothing was persisted.
+        assertThat(debitedWallet.get()).isSameAs(walletA);
+        assertThat(walletA.getAvailableBalance()).isEqualTo(10000L);
+        assertThat(walletB.getAvailableBalance()).isEqualTo(5000L);
+        verify(transactionRepository, never()).save(any());
+        verify(walletRepository, never()).save(any());
+    }
+
+    @Test
+    @DisplayName("getStatement: returns paged statement entries")
+    void getStatement_ReturnsPagedEntries() {
+        var entry = com.minidigitalwallet.entity.LedgerEntry.builder()
+            .id(UUID.randomUUID())
+            .walletId(walletA.getId())
+            .entryType(EntryType.CREDIT)
+            .amount(5000L)
+            .lineNo(1)
+            .balanceAfter(15000L)
+            .createdAt(java.time.Instant.now())
+            .build();
+
+        var page = new org.springframework.data.domain.PageImpl<>(java.util.List.of(entry));
+        when(entryRepository.findAll(any(org.springframework.data.jpa.domain.Specification.class), any(org.springframework.data.domain.Pageable.class)))
+            .thenReturn(page);
+
+        var result = ledgerService.getStatement(
+            walletA.getId(), EntryType.CREDIT, null, null, org.springframework.data.domain.PageRequest.of(0, 10));
+
+        assertThat(result.getContent()).hasSize(1);
+        assertThat(result.getContent().get(0).amount()).isEqualTo(5000L);
+        assertThat(result.getContent().get(0).entryType()).isEqualTo(EntryType.CREDIT);
+    }
+
+    @Test
+    @DisplayName("exportStatementCsv: streams valid CSV format with header")
+    void exportStatementCsv_WritesValidCsv() throws java.io.IOException {
+        var entry = com.minidigitalwallet.entity.LedgerEntry.builder()
+            .id(UUID.randomUUID())
+            .walletId(walletA.getId())
+            .entryType(EntryType.DEBIT)
+            .amount(2000L)
+            .lineNo(1)
+            .balanceAfter(8000L)
+            .createdAt(java.time.Instant.parse("2026-10-13T10:00:00Z"))
+            .build();
+
+        when(entryRepository.findAll(any(org.springframework.data.jpa.domain.Specification.class), any(org.springframework.data.domain.Pageable.class)))
+            .thenReturn(new org.springframework.data.domain.PageImpl<>(java.util.List.of(entry)));
+
+        var writer = new java.io.StringWriter();
+        ledgerService.exportStatementCsv(walletA.getId(), null, null, null, writer);
+
+        String csv = writer.toString();
+        assertThat(csv).startsWith("entry_id,transaction_id,wallet_id,entry_type,amount,balance_after,created_at\n");
+        assertThat(csv).contains("DEBIT,2000,8000,2026-10-13T10:00:00Z");
     }
 }

@@ -14,8 +14,9 @@ import org.testcontainers.junit.jupiter.Testcontainers;
 import static org.assertj.core.api.Assertions.assertThat;
 
 /**
- * Proves Flyway V1..V4 migrations apply cleanly on real PostgreSQL 16
- * (H2 never executes this SQL in unit tests, so syntax drift would go unnoticed).
+ * Proves the Flyway migrations under db/migration apply cleanly on real
+ * PostgreSQL 16 (H2 never executes this SQL in unit tests, so syntax drift
+ * would go unnoticed).
  */
 @SpringBootTest
 @Testcontainers
@@ -31,8 +32,7 @@ class FlywayMigrationTest {
         registry.add("spring.datasource.username", postgres::getUsername);
         registry.add("spring.datasource.password", postgres::getPassword);
         registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
-        // Let Flyway own the schema; skip Hibernate validation because Phase 3/4
-        // entities (outbox, idempotency) have no migrations yet by design.
+        // Let Flyway own the schema; skip Hibernate validation for this test.
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "none");
         registry.add("spring.flyway.enabled", () -> "true");
     }
@@ -41,11 +41,21 @@ class FlywayMigrationTest {
     private Flyway flyway;
 
     @Test
-    @DisplayName("Flyway applies V1..V5 on PostgreSQL without errors")
+    @DisplayName("Every migration on the classpath is applied on PostgreSQL without errors")
     void flyway_MigratesCleanly() {
-        var applied = flyway.info().applied();
-        assertThat(applied).hasSize(5);
+        var info = flyway.info();
+
+        // Nothing left to apply => the whole chain ran end to end.
+        assertThat(info.pending())
+            .as("all migrations must already be applied by the Spring context")
+            .isEmpty();
+
+        var applied = info.applied();
+        assertThat(applied).isNotEmpty();
+        assertThat(applied).allMatch(m -> !m.getState().isFailed());
+
+        // Guard against silently dropping the newest script during a refactor.
         assertThat(applied[applied.length - 1].getScript())
-            .contains("V5__idempotency_schema.sql");
+            .contains("V11__user_role.sql");
     }
 }

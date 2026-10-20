@@ -6,9 +6,13 @@ import com.minidigitalwallet.dto.response.PaymentMethodResponse;
 import com.minidigitalwallet.entity.enums.CardProvider;
 import com.minidigitalwallet.entity.enums.MethodType;
 import com.minidigitalwallet.entity.enums.PaymentMethodStatus;
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.exception.GlobalExceptionHandler;
 import com.minidigitalwallet.exception.PaymentMethodNotFoundException;
+import com.minidigitalwallet.security.UserPrincipal;
 import com.minidigitalwallet.service.PaymentMethodService;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -21,6 +25,8 @@ import org.springframework.context.annotation.ComponentScan;
 import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
@@ -49,6 +55,21 @@ class PaymentMethodControllerTest {
 
     @MockBean
     private PaymentMethodService paymentMethodService;
+
+    private final UUID ownerId = UUID.randomUUID();
+    private final String owner = ownerId.toString();
+
+    @BeforeEach
+    void setAuth() {
+        UserPrincipal principal = UserPrincipal.create(ownerId, "alice", UserRole.USER);
+        var auth = new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
+        SecurityContextHolder.getContext().setAuthentication(auth);
+    }
+
+    @AfterEach
+    void clearAuth() {
+        SecurityContextHolder.clearContext();
+    }
 
     @Test
     @DisplayName("POST /api/v1/payment-methods should return 201 Created on valid card linking")
@@ -99,15 +120,15 @@ class PaymentMethodControllerTest {
     void getPaymentMethods_Success() throws Exception {
         UUID id = UUID.randomUUID();
         PaymentMethodResponse response = new PaymentMethodResponse(
-            id, "USER_987654", MethodType.DEBIT_CARD, CardProvider.VISA,
+            id, owner, MethodType.DEBIT_CARD, CardProvider.VISA,
             "**** **** **** 4242", "NGUYEN VAN A", "tok_mock_visa_4242",
             true, PaymentMethodStatus.ACTIVE, Instant.now(), Instant.now()
         );
 
-        when(paymentMethodService.getPaymentMethodsByOwner("USER_987654")).thenReturn(List.of(response));
+        when(paymentMethodService.getPaymentMethodsByOwner(owner)).thenReturn(List.of(response));
 
         mockMvc.perform(get("/api/v1/payment-methods")
-                .param("owner_id", "USER_987654"))
+                .param("owner_id", owner))
             .andExpect(status().isOk())
             .andExpect(jsonPath("$[0].id").value(id.toString()))
             .andExpect(jsonPath("$[0].masked_number").value("**** **** **** 4242"));
@@ -117,6 +138,12 @@ class PaymentMethodControllerTest {
     @DisplayName("DELETE /api/v1/payment-methods/{id} should return 204 No Content on revocation")
     void revokePaymentMethod_Success() throws Exception {
         UUID id = UUID.randomUUID();
+        PaymentMethodResponse existing = new PaymentMethodResponse(
+            id, owner, MethodType.DEBIT_CARD, CardProvider.VISA,
+            "**** **** **** 4242", "NGUYEN VAN A", "tok_mock_visa_4242",
+            true, PaymentMethodStatus.ACTIVE, Instant.now(), Instant.now()
+        );
+        when(paymentMethodService.getPaymentMethod(id)).thenReturn(existing);
         doNothing().when(paymentMethodService).revokePaymentMethod(id);
 
         mockMvc.perform(delete("/api/v1/payment-methods/{id}", id))
@@ -129,7 +156,7 @@ class PaymentMethodControllerTest {
     @DisplayName("DELETE /api/v1/payment-methods/{id} should return 404 when payment method not found")
     void revokePaymentMethod_NotFound_Returns404() throws Exception {
         UUID id = UUID.randomUUID();
-        doThrow(new PaymentMethodNotFoundException(id)).when(paymentMethodService).revokePaymentMethod(id);
+        when(paymentMethodService.getPaymentMethod(id)).thenThrow(new PaymentMethodNotFoundException(id));
 
         mockMvc.perform(delete("/api/v1/payment-methods/{id}", id))
             .andExpect(status().isNotFound())

@@ -1,6 +1,6 @@
 import React, { useState } from 'react';
 
-export default function AuthPage({ onLogin, onRegister, onQuickDemoLogin, toast, onCloseToast }) {
+export default function AuthPage({ onLogin, onRegister, toast, onCloseToast }) {
   const [authMode, setAuthMode] = useState('login');
   const [authForm, setAuthForm] = useState({
     username: '',
@@ -112,33 +112,6 @@ export default function AuthPage({ onLogin, onRegister, onQuickDemoLogin, toast,
             {authMode === 'login' ? 'Sign In' : 'Create Account'}
           </button>
         </form>
-
-        <div className="quick-demo-section">
-          <div className="quick-demo-title">Quick Demo Login:</div>
-          <div className="quick-demo-buttons">
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => onQuickDemoLogin('Alice')}
-            >
-              Alice Tran
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => onQuickDemoLogin('Bob')}
-            >
-              Bob Le
-            </button>
-            <button
-              type="button"
-              className="btn btn-outline btn-sm"
-              onClick={() => onQuickDemoLogin('John')}
-            >
-              John Doe
-            </button>
-          </div>
-        </div>
       </div>
     </div>
   );

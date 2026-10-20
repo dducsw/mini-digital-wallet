@@ -1,18 +1,22 @@
 import React from 'react';
-import { CreditCard, Plus, Trash2 } from 'lucide-react';
+import { Plus, Trash2 } from 'lucide-react';
+import PageHeader from '../common/PageHeader';
 
-export default function PaymentMethodsTab({
+export default function CardsPage({
   paymentMethods,
   onOpenLinkCard,
   onRevokeCard,
+  onNavigate,
 }) {
   return (
     <div className="white-card">
-      <div className="card-title-bar">
-        <h3>
-          <CreditCard size={17} color="var(--blue-primary)" />
-          Payment Methods (PCI-DSS Tokenized)
-        </h3>
+      <PageHeader
+        title="My Cards"
+        subtitle="Linked payment cards (PCI-DSS flow: masked number + token only)"
+        onBack={() => onNavigate('dashboard')}
+      />
+
+      <div style={{ marginBottom: '18px' }}>
         <button className="btn btn-primary btn-sm" onClick={onOpenLinkCard}>
           <Plus size={14} /> Link New Card
         </button>
@@ -67,7 +71,7 @@ export default function PaymentMethodsTab({
                   className="btn btn-outline btn-sm"
                   style={{ padding: '3px 8px', color: 'var(--danger)' }}
                   onClick={() => onRevokeCard(pm.id)}
-                  title="Revoke this card"
+                  title="Remove this card"
                 >
                   <Trash2 size={13} /> Revoke
                 </button>
@@ -77,14 +81,7 @@ export default function PaymentMethodsTab({
         </div>
       ) : (
         <div className="empty-placeholder">
-          <p>No payment methods connected yet.</p>
-          <button
-            className="btn btn-secondary btn-sm"
-            style={{ marginTop: '12px' }}
-            onClick={onOpenLinkCard}
-          >
-            <Plus size={14} /> Link First Card
-          </button>
+          <p>No cards linked yet.</p>
         </div>
       )}
     </div>

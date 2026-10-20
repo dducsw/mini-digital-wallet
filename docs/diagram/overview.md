@@ -1,6 +1,6 @@
-# Kiến Trúc Tổng Quan Hệ Thống Mini Digital Wallet (Phase 2)
+# Kiến Trúc Tổng Quan Hệ Thống Mini Digital Wallet
 
-Tài liệu mô tả kiến trúc tổng thể, mô hình phân tầng Layered Architecture và luồng điều phối giao dịch tài chính cốt lõi của **mini-digital-wallet** tại mốc Phase 2.
+Tài liệu mô tả kiến trúc tổng thể, mô hình phân tầng Layered Architecture và luồng điều phối giao dịch tài chính cốt lõi của **mini-digital-wallet** (bao gồm Phase 4 Reconciliation).
 
 ---
 
@@ -20,6 +20,7 @@ flowchart TD
         WALLET_CTRL["WalletController (/api/v1/wallets)"]
         CARD_CTRL["PaymentMethodController (/api/v1/payment-methods)"]
         TX_CTRL["TransferController (/api/v1/transfers)"]
+        RECON_CTRL["ReconciliationController (/api/v1/admin/reconciliation)"]
         EX_HANDLER["GlobalExceptionHandler (RFC 7807 ProblemDetail)"]
     end
 
@@ -34,14 +35,15 @@ flowchart TD
         WALLET_SVC["WalletService"]
         CARD_SVC["PaymentMethodService"]
         LEDGER_SVC["LedgerService (@Transactional READ_COMMITTED)"]
+        RECON_SVC["ReconciliationService (@Scheduled 2h đêm)"]
         ORDER_LOCK["Deterministic Lock Ordering: min(A,B) -> max(A,B)"]
         LEDGER_SVC --- ORDER_LOCK
     end
 
     subgraph DataAccessLayer["Tầng Lưu Trữ & Ràng Buộc Dữ Liệu (Spring Data JPA & DB)"]
-        REPOS["WalletRepository, LedgerTransactionRepository, LedgerEntryRepository"]
+        REPOS["WalletRepository, LedgerTransactionRepository, LedgerEntryRepository, ReconciliationRunRepository"]
         PG["PostgreSQL 16 Engine"]
-        PG_CONSTRAINTS["Database Constraints:<br/>- chk_wallet_available_balance (available_balance >= 0)<br/>- uq_ledger_transactions_ref (reference_id UNIQUE)<br/>- uq_ledger_entries_tx_line (transaction_id, line_no UNIQUE)"]
+        PG_CONSTRAINTS["Database Constraints:<br/>- chk_wallet_available_balance (available_balance >= 0)<br/>- uq_ledger_transactions_ref (reference_id UNIQUE)<br/>- uq_ledger_entries_tx_line (transaction_id, line_no UNIQUE)<br/>- uq_reversal_of_transaction (đảo 1 lần duy nhất)<br/>- uq_wallets_account_number (STK 12 số UNIQUE)"]
         PG --- PG_CONSTRAINTS
     end
 
@@ -112,10 +114,10 @@ sequenceDiagram
 
 ### 3.2 Giải pháp phá vỡ Deadlock (Deterministic Lock Ordering)
 
-Khi hai luồng thực thi giao dịch chuyển tiền ngược chiều cùng thời điểm ($A \rightarrow B$ và $B \rightarrow A$):
-- Nếu lấy khóa theo thứ tự tham số truyền vào: Luồng 1 giữ lock $A$ chờ $B$; Luồng 2 giữ lock $B$ chờ $A$ $\rightarrow$ Sinh chu trình chờ (Circular Wait) gây Deadlock.
+Khi hai luồng thực thi giao dịch chuyển tiền ngược chiều cùng thời điểm (từ ví A sang ví B và từ ví B sang ví A):
+- Nếu lấy khóa theo thứ tự tham số truyền vào: Luồng 1 giữ lock A chờ B; Luồng 2 giữ lock B chờ A -> Sinh chu trình chờ (Circular Wait) gây Deadlock.
 - **Giải pháp**: Luôn so sánh UUID theo thứ tự từ điển:
-  $$\text{First Lock} = \min(A, B), \quad \text{Second Lock} = \max(A, B)$$
+  `First Lock = min(UUID_A, UUID_B), Second Lock = max(UUID_A, UUID_B)`
   Cả hai luồng bắt buộc phải xin khóa ví nhỏ hơn trước, loại bỏ hoàn toàn chu trình chờ trong đồ thị cấp phát tài nguyên.
 
 ### 3.3 Tính toàn vẹn sổ kép (Double-Entry Bookkeeping)

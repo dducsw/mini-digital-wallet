@@ -17,17 +17,14 @@ public record WalletResponse(
     @JsonProperty("owner_id")
     String ownerId,
 
-    @JsonProperty("account_type")
-    WalletType accountType,
+    @JsonProperty("account_number")
+    String accountNumber,
 
     @JsonProperty("wallet_type")
     WalletType walletType,
 
     @JsonProperty("account_status")
     WalletStatus accountStatus,
-
-    @JsonProperty("status")
-    WalletStatus status,
 
     @JsonProperty("available_balance")
     Long availableBalance,
@@ -51,9 +48,8 @@ public record WalletResponse(
         return new WalletResponse(
             wallet.getId(),
             wallet.getUserId(),
+            wallet.getAccountNumber(),
             wallet.getWalletType(),
-            wallet.getWalletType(),
-            wallet.getStatus(),
             wallet.getStatus(),
             wallet.getAvailableBalance(),
             wallet.getLedgerBalance(),

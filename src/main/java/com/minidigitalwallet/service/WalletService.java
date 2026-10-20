@@ -7,7 +7,7 @@ import com.minidigitalwallet.dto.response.WalletResponse;
 import java.util.List;
 import java.util.UUID;
 
-public interface WalletService {
+public interface WalletService extends WalletLookup {
 
     WalletResponse createWallet(CreateWalletRequest request);
 
@@ -20,10 +20,4 @@ public interface WalletService {
     List<WalletResponse> getWalletsByUserId(String userId);
 
     WalletResponse updateStatus(UUID id, UpdateWalletStatusRequest request);
-
-    /**
-     * DIP-friendly lookup: TransferService only needs the owner id to verify
-     * card ownership, never the JPA entity itself.
-     */
-    String getWalletOwnerId(UUID id);
 }

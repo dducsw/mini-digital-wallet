@@ -42,7 +42,8 @@ public class TransferController {
     @PostMapping("/withdraw")
     public ResponseEntity<TransferResponse> withdraw(
         @Valid @RequestBody WithdrawRequest request,
-        @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey
+        @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+        @RequestHeader(name = "X-Transaction-Pin", required = false) String pin
     ) {
         String actorId = resolveActorId(request.walletId().toString());
         return idempotencyService.execute(
@@ -51,14 +52,19 @@ public class TransferController {
             idempotencyKey,
             request,
             TransferResponse.class,
-            () -> ResponseEntity.status(HttpStatus.CREATED).body(transferService.withdraw(request, idempotencyKey))
+            () -> ResponseEntity.status(HttpStatus.CREATED).body(
+                pin != null
+                    ? transferService.withdraw(request, idempotencyKey, pin)
+                    : transferService.withdraw(request, idempotencyKey)
+            )
         );
     }
 
     @PostMapping("/p2p")
     public ResponseEntity<TransferResponse> transfer(
         @Valid @RequestBody TransferRequest request,
-        @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey
+        @RequestHeader(name = "Idempotency-Key", required = false) String idempotencyKey,
+        @RequestHeader(name = "X-Transaction-Pin", required = false) String pin
     ) {
         String actorId = resolveActorId(request.sourceWalletId().toString());
         return idempotencyService.execute(
@@ -67,7 +73,11 @@ public class TransferController {
             idempotencyKey,
             request,
             TransferResponse.class,
-            () -> ResponseEntity.status(HttpStatus.CREATED).body(transferService.transfer(request, idempotencyKey))
+            () -> ResponseEntity.status(HttpStatus.CREATED).body(
+                pin != null
+                    ? transferService.transfer(request, idempotencyKey, pin)
+                    : transferService.transfer(request, idempotencyKey)
+            )
         );
     }
 

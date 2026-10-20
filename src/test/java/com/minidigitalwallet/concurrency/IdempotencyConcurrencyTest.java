@@ -1,20 +1,28 @@
 package com.minidigitalwallet.concurrency;
 
+import com.fasterxml.jackson.databind.ObjectMapper;
 import com.minidigitalwallet.dto.request.TopUpRequest;
 import com.minidigitalwallet.dto.response.TransferResponse;
+import com.minidigitalwallet.entity.IdempotencyRecord;
 import com.minidigitalwallet.entity.PaymentMethod;
 import com.minidigitalwallet.entity.Wallet;
+import com.minidigitalwallet.entity.enums.CardProvider;
 import com.minidigitalwallet.entity.enums.IdempotencyStatus;
+import com.minidigitalwallet.entity.enums.MethodType;
 import com.minidigitalwallet.entity.enums.PaymentMethodStatus;
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
 import com.minidigitalwallet.exception.AppException;
 import com.minidigitalwallet.repository.IdempotencyRecordRepository;
+import com.minidigitalwallet.repository.LedgerEntryRepository;
 import com.minidigitalwallet.repository.LedgerTransactionRepository;
 import com.minidigitalwallet.repository.PaymentMethodRepository;
 import com.minidigitalwallet.repository.WalletRepository;
+import com.minidigitalwallet.security.UserPrincipal;
 import com.minidigitalwallet.service.IdempotencyService;
 import com.minidigitalwallet.service.TransferService;
+import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
@@ -22,14 +30,23 @@ import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.boot.test.context.SpringBootTest;
 import org.springframework.http.HttpStatus;
 import org.springframework.http.ResponseEntity;
+import org.springframework.jdbc.core.JdbcTemplate;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.concurrent.DelegatingSecurityContextExecutorService;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.context.DynamicPropertyRegistry;
 import org.springframework.test.context.DynamicPropertySource;
 import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.nio.charset.StandardCharsets;
+import java.security.MessageDigest;
 import java.time.Instant;
+import java.util.HexFormat;
+import java.util.List;
 import java.util.UUID;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
@@ -42,6 +59,9 @@ import static org.assertj.core.api.Assertions.assertThatThrownBy;
 @SpringBootTest
 @Testcontainers
 class IdempotencyConcurrencyTest {
+
+    /** Wallet writes are owner-scoped, so the test must act as an authenticated caller. */
+    private static final UUID ALICE_ID = UUID.fromString("11111111-1111-1111-1111-111111111111");
 
     @Container
     static final PostgreSQLContainer<?> postgres =
@@ -74,13 +94,16 @@ class IdempotencyConcurrencyTest {
     private LedgerTransactionRepository transactionRepository;
 
     @Autowired
-    private com.minidigitalwallet.repository.LedgerEntryRepository entryRepository;
+    private LedgerEntryRepository entryRepository;
 
     @Autowired
     private IdempotencyRecordRepository idempotencyRecordRepository;
 
     @Autowired
-    private org.springframework.jdbc.core.JdbcTemplate jdbcTemplate;
+    private JdbcTemplate jdbcTemplate;
+
+    @Autowired
+    private ObjectMapper objectMapper;
 
     private Wallet userWallet;
     private PaymentMethod paymentCard;
@@ -93,15 +116,17 @@ class IdempotencyConcurrencyTest {
         paymentMethodRepository.deleteAll();
         walletRepository.deleteAll();
 
+        authenticateAsAlice();
+
         // System settlement wallet with exact UUID
         jdbcTemplate.update("""
-            INSERT INTO wallets (id, user_id, wallet_type, currency, available_balance, ledger_balance, status, version, created_at, updated_at)
-            VALUES ('00000000-0000-0000-0000-000000000001', 'SYS_EXTERNAL_SETTLEMENT', 'SYSTEM', 'USD', 0, 0, 'ACTIVE', 0, NOW(), NOW())
+            INSERT INTO wallets (id, user_id, account_number, wallet_type, currency, available_balance, ledger_balance, status, version, created_at, updated_at)
+            VALUES ('00000000-0000-0000-0000-000000000001', 'SYS_EXTERNAL_SETTLEMENT', '882000000001', 'SYSTEM', 'USD', 0, 0, 'ACTIVE', 0, NOW(), NOW())
         """);
 
         // User wallet
         userWallet = Wallet.builder()
-            .userId("user-alice")
+            .userId(ALICE_ID.toString())
             .walletType(WalletType.USER)
             .currency("USD")
             .availableBalance(0L)
@@ -113,9 +138,9 @@ class IdempotencyConcurrencyTest {
 
         // User payment card
         paymentCard = PaymentMethod.builder()
-            .ownerId("user-alice")
-            .methodType(com.minidigitalwallet.entity.enums.MethodType.DEBIT_CARD)
-            .provider(com.minidigitalwallet.entity.enums.CardProvider.VISA)
+            .ownerId(ALICE_ID.toString())
+            .methodType(MethodType.DEBIT_CARD)
+            .provider(CardProvider.VISA)
             .maskedNumber("•••• 4242")
             .holderName("ALICE TRAN")
             .paymentToken("tok_mock_visa_4242")
@@ -125,23 +150,37 @@ class IdempotencyConcurrencyTest {
         paymentCard = paymentMethodRepository.save(paymentCard);
     }
 
+    @AfterEach
+    void tearDown() {
+        SecurityContextHolder.clearContext();
+    }
+
+    /** Mirrors what JwtAuthenticationFilter puts in the SecurityContext for a real request. */
+    private static void authenticateAsAlice() {
+        UserPrincipal principal = UserPrincipal.create(ALICE_ID, "user-alice", UserRole.USER);
+        SecurityContextHolder.getContext().setAuthentication(
+            new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities()));
+    }
+
     @Test
     @DisplayName("Phase 3 DoD: 100 concurrent threads with same idempotency key -> exactly 1 executes, others 409 or replay")
     void concurrentIdempotencyRequests_executeExactlyOnce() throws InterruptedException {
         int threadCount = 100;
-        ExecutorService executor = Executors.newFixedThreadPool(20);
+        // Each worker thread must carry the caller identity, like a real servlet thread would.
+        ExecutorService executor = new DelegatingSecurityContextExecutorService(
+            Executors.newFixedThreadPool(20));
         CountDownLatch readyLatch = new CountDownLatch(threadCount);
         CountDownLatch startLatch = new CountDownLatch(1);
         CountDownLatch doneLatch = new CountDownLatch(threadCount);
 
-        String actorId = "user-alice";
+        String actorId = ALICE_ID.toString();
         String idempotencyKey = "key-" + UUID.randomUUID();
         TopUpRequest request = new TopUpRequest(userWallet.getId(), paymentCard.getId(), 5000L, "Topup concurrency test");
 
         AtomicInteger executedCount = new AtomicInteger(0);
         AtomicInteger replayCount = new AtomicInteger(0);
         AtomicInteger conflictCount = new AtomicInteger(0);
-        java.util.List<String> otherErrors = new java.util.concurrent.CopyOnWriteArrayList<>();
+        List<String> otherErrors = new CopyOnWriteArrayList<>();
 
         for (int i = 0; i < threadCount; i++) {
             executor.submit(() -> {
@@ -217,7 +256,7 @@ class IdempotencyConcurrencyTest {
     @Test
     @DisplayName("Payload modification with same idempotency key must throw 422 Unprocessable Entity")
     void payloadMismatch_throws422UnprocessableEntity() {
-        String actorId = "user-alice";
+        String actorId = ALICE_ID.toString();
         String idempotencyKey = "key-" + UUID.randomUUID();
         TopUpRequest originalRequest = new TopUpRequest(userWallet.getId(), paymentCard.getId(), 5000L, "Original");
         TopUpRequest alteredRequest = new TopUpRequest(userWallet.getId(), paymentCard.getId(), 10000L, "Altered");
@@ -246,23 +285,20 @@ class IdempotencyConcurrencyTest {
             .hasFieldOrPropertyWithValue("status", HttpStatus.UNPROCESSABLE_ENTITY);
     }
 
-    @Autowired
-    private com.fasterxml.jackson.databind.ObjectMapper objectMapper;
-
     @Test
     @DisplayName("Lease recovery: Expired IN_PROGRESS lease is automatically reclaimed")
     void expiredLease_isAutomaticallyReclaimed() throws Exception {
-        String actorId = "user-alice";
+        String actorId = ALICE_ID.toString();
         String idempotencyKey = "key-" + UUID.randomUUID();
         TopUpRequest request = new TopUpRequest(userWallet.getId(), paymentCard.getId(), 5000L, "Lease recovery");
 
         String json = objectMapper.writeValueAsString(request);
-        String hash = java.util.HexFormat.of().formatHex(
-            java.security.MessageDigest.getInstance("SHA-256").digest(json.getBytes(java.nio.charset.StandardCharsets.UTF_8))
+        String hash = HexFormat.of().formatHex(
+            MessageDigest.getInstance("SHA-256").digest(json.getBytes(StandardCharsets.UTF_8))
         );
 
         // Simulate crashed node by inserting an expired IN_PROGRESS record
-        var record = com.minidigitalwallet.entity.IdempotencyRecord.builder()
+        var record = IdempotencyRecord.builder()
             .actorId(actorId)
             .operation("TOPUP")
             .idempotencyKey(idempotencyKey)

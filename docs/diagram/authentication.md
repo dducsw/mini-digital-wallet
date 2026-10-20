@@ -73,8 +73,9 @@ erDiagram
     wallets {
         uuid id PK "gen_random_uuid()"
         varchar user_id FK "References users.id"
+        varchar account_number UK "12 digits, 8820..."
         varchar wallet_type "USER or SYSTEM"
-        varchar currency "ISO 4217 (USD, VND)"
+        varchar currency "ISO 4217 (USD)"
         bigint available_balance "Balance in minor units"
         bigint ledger_balance "Settled ledger balance"
         varchar status "ACTIVE, FROZEN, CLOSED"
@@ -118,7 +119,7 @@ sequenceDiagram
     AS->>WS: createWallet(userId, currency, USER)
     WS->>DB: INSERT INTO wallets VALUES (...)
     DB-->>WS: Wallet persisted (defaultWalletId)
-    AS->>JTP: generateToken(userId, username)
+    AS->>JTP: generateToken(userId, username, role)
     JTP-->>AS: accessToken (JWT)
     AS-->>AC: AuthResponse (accessToken, userId, defaultWalletId)
     AC-->>Client: HTTP 201 Created (JSON)
@@ -157,7 +158,7 @@ sequenceDiagram
             PE-->>AS: true
             AS->>WS: getWalletsByUserId(userId)
             WS-->>AS: List&lt;WalletResponse&gt;
-            AS->>JTP: generateToken(userId, username)
+            AS->>JTP: generateToken(userId, username, role)
             JTP-->>AS: accessToken
             AS-->>AC: AuthResponse (accessToken, userId, defaultWalletId)
             AC-->>Client: HTTP 200 OK (JSON)

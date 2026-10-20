@@ -80,7 +80,7 @@ class WalletServiceTest {
         assertThat(response.ownerId()).isEqualTo("USER_123");
         assertThat(response.availableBalance()).isEqualTo(0L);
         assertThat(response.ledgerBalance()).isEqualTo(0L);
-        assertThat(response.status()).isEqualTo(WalletStatus.ACTIVE);
+        assertThat(response.accountStatus()).isEqualTo(WalletStatus.ACTIVE);
         verify(walletRepository, times(1)).save(any(Wallet.class));
     }
 
@@ -151,7 +151,7 @@ class WalletServiceTest {
 
         WalletResponse response = walletService.updateStatus(walletId, new UpdateWalletStatusRequest(WalletStatus.FROZEN));
 
-        assertThat(response.status()).isEqualTo(WalletStatus.FROZEN);
+        assertThat(response.accountStatus()).isEqualTo(WalletStatus.FROZEN);
     }
 
     @Test

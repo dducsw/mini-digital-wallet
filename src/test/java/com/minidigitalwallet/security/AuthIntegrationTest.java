@@ -81,4 +81,91 @@ class AuthIntegrationTest {
                         .header("Authorization", "Bearer " + loginAuth.accessToken()))
                 .andExpect(status().isOk());
     }
+
+    @Test
+    @DisplayName("Role check: a freshly registered USER cannot call ADMIN-only ops endpoints (403)")
+    void adminEndpoint_AsRegularUser_ReturnsForbidden() throws Exception {
+        RegisterRequest registerReq = new RegisterRequest(
+                "plain_user",
+                "plain@example.com",
+                "Password123!",
+                "Plain User",
+                "USD"
+        );
+        MvcResult registerResult = mockMvc.perform(post("/api/v1/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(registerReq)))
+                .andExpect(status().isCreated())
+                .andReturn();
+        AuthResponse auth = objectMapper.readValue(
+                registerResult.getResponse().getContentAsString(), AuthResponse.class);
+
+        // Authenticated, but lacking ROLE_ADMIN: forbidden (not 401, not 200).
+        mockMvc.perform(get("/api/v1/admin/reconciliation/runs")
+                        .header("Authorization", "Bearer " + auth.accessToken()))
+                .andExpect(status().isForbidden());
+    }
+
+    @Test
+    @DisplayName("Refresh rotates pair, reuse is rejected, logout revokes")
+    void refreshRotateAndLogout_Success() throws Exception {
+        RegisterRequest registerReq = new RegisterRequest(
+                "refresh_user",
+                "refresh@example.com",
+                "Password123!",
+                "Refresh User",
+                "USD"
+        );
+        MvcResult registerResult = mockMvc.perform(post("/api/v1/auth/register")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(registerReq)))
+                .andExpect(status().isCreated())
+                .andExpect(jsonPath("$.refreshToken").isNotEmpty())
+                .andReturn();
+        AuthResponse regAuth = objectMapper.readValue(
+                registerResult.getResponse().getContentAsString(), AuthResponse.class);
+        assertNotNull(regAuth.refreshToken());
+
+        // Rotate
+        MvcResult refreshResult = mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest(regAuth.refreshToken()))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accessToken").isNotEmpty())
+                .andExpect(jsonPath("$.refreshToken").isNotEmpty())
+                .andReturn();
+        AuthResponse rotated = objectMapper.readValue(
+                refreshResult.getResponse().getContentAsString(), AuthResponse.class);
+
+        // Reuse of old token -> 401 (theft protection)
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest(regAuth.refreshToken()))))
+                .andExpect(status().isUnauthorized());
+
+        // Logout needs a fresh login (reuse wiped all sessions)
+        MvcResult loginResult = mockMvc.perform(post("/api/v1/auth/login")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new LoginRequest("refresh_user", "Password123!"))))
+                .andExpect(status().isOk())
+                .andReturn();
+        AuthResponse freshLogin = objectMapper.readValue(
+                loginResult.getResponse().getContentAsString(), AuthResponse.class);
+
+        mockMvc.perform(post("/api/v1/auth/logout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest(freshLogin.refreshToken()))))
+                .andExpect(status().isNoContent());
+
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest(freshLogin.refreshToken()))))
+                .andExpect(status().isUnauthorized());
+        assertNotNull(rotated.accessToken());
+    }
 }

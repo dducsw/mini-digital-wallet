@@ -1,6 +1,7 @@
 package com.minidigitalwallet.security;
 
 import com.minidigitalwallet.entity.User;
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.entity.enums.UserStatus;
 import lombok.AllArgsConstructor;
 import lombok.Builder;
@@ -22,6 +23,7 @@ public class UserPrincipal implements UserDetails {
     private final String username;
     private final String email;
     private final String password;
+    private final UserRole role;
     private final Collection<? extends GrantedAuthority> authorities;
     private final boolean active;
 
@@ -31,20 +33,28 @@ public class UserPrincipal implements UserDetails {
                 .username(user.getUsername())
                 .email(user.getEmail())
                 .password(user.getPasswordHash())
-                .authorities(Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")))
+                .role(user.getRole())
+                .authorities(authoritiesOf(user.getRole()))
                 .active(user.getStatus() == UserStatus.ACTIVE)
                 .build();
     }
 
-    public static UserPrincipal create(UUID id, String username) {
+    /** Principal rebuilt from JWT claims — no database round trip on the request path. */
+    public static UserPrincipal create(UUID id, String username, UserRole role) {
         return UserPrincipal.builder()
                 .id(id)
                 .username(username)
                 .email(null)
                 .password(null)
-                .authorities(Collections.singletonList(new SimpleGrantedAuthority("ROLE_USER")))
+                .role(role)
+                .authorities(authoritiesOf(role))
                 .active(true)
                 .build();
+    }
+
+    private static Collection<? extends GrantedAuthority> authoritiesOf(UserRole role) {
+        UserRole effective = role == null ? UserRole.USER : role;
+        return Collections.singletonList(new SimpleGrantedAuthority("ROLE_" + effective.name()));
     }
 
     @Override

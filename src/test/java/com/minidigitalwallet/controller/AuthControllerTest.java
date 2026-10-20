@@ -56,7 +56,7 @@ class AuthControllerTest {
         RegisterRequest request = new RegisterRequest("john_doe", "john@example.com", "SecretPass123", "John Doe", "USD");
         UUID userId = UUID.randomUUID();
         UUID walletId = UUID.randomUUID();
-        AuthResponse response = new AuthResponse("token123", "Bearer", 86400L, userId, "john_doe", "john@example.com", walletId);
+        AuthResponse response = new AuthResponse("token123", "Bearer", 86400L, userId, "john_doe", "john@example.com", walletId, "refresh123", 604800L);
 
         when(authService.register(any(RegisterRequest.class))).thenReturn(response);
 
@@ -87,7 +87,7 @@ class AuthControllerTest {
     void login_Success() throws Exception {
         LoginRequest request = new LoginRequest("john_doe", "SecretPass123");
         UUID userId = UUID.randomUUID();
-        AuthResponse response = new AuthResponse("token123", "Bearer", 86400L, userId, "john_doe", "john@example.com", null);
+        AuthResponse response = new AuthResponse("token123", "Bearer", 86400L, userId, "john_doe", "john@example.com", null, "refresh123", 604800L);
 
         when(authService.login(any(LoginRequest.class))).thenReturn(response);
 
@@ -111,5 +111,44 @@ class AuthControllerTest {
                         .content(objectMapper.writeValueAsString(request)))
                 .andExpect(status().isUnauthorized())
                 .andExpect(jsonPath("$.detail").value("Invalid username or password"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/auth/pin returns 400 Bad Request on invalid pin format")
+    void setPin_InvalidFormat_ReturnsBadRequest() throws Exception {
+        var request = new com.minidigitalwallet.dto.request.SetPinRequest("123");
+
+        mockMvc.perform(post("/api/v1/auth/pin")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(request)))
+                .andExpect(status().isBadRequest());
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/auth/refresh returns 200 OK with rotated pair")
+    void refresh_Success() throws Exception {
+        UUID userId = UUID.randomUUID();
+        AuthResponse response = new AuthResponse("new-token", "Bearer", 900L, userId, "john_doe",
+            "john@example.com", null, "new-refresh", 604800L);
+
+        when(authService.refresh("old-refresh")).thenReturn(response);
+
+        mockMvc.perform(post("/api/v1/auth/refresh")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest("old-refresh"))))
+                .andExpect(status().isOk())
+                .andExpect(jsonPath("$.accessToken").value("new-token"))
+                .andExpect(jsonPath("$.refreshToken").value("new-refresh"));
+    }
+
+    @Test
+    @DisplayName("POST /api/v1/auth/logout returns 204 No Content")
+    void logout_Success() throws Exception {
+        mockMvc.perform(post("/api/v1/auth/logout")
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .content(objectMapper.writeValueAsString(
+                            new com.minidigitalwallet.dto.request.RefreshRequest("some-refresh"))))
+                .andExpect(status().isNoContent());
     }
 }

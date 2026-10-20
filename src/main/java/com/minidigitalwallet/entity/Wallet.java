@@ -17,7 +17,8 @@ import java.util.UUID;
 
 @Entity
 @Table(name = "wallets", uniqueConstraints = {
-    @UniqueConstraint(name = "uq_wallets_user_currency_type", columnNames = {"user_id", "currency", "wallet_type"})
+    @UniqueConstraint(name = "uq_wallets_user_currency_type", columnNames = {"user_id", "currency", "wallet_type"}),
+    @UniqueConstraint(name = "uq_wallets_account_number", columnNames = {"account_number"})
 })
 @Getter
 @Setter
@@ -33,6 +34,9 @@ public class Wallet {
 
     @Column(name = "user_id", nullable = false, length = 64)
     private String userId;
+
+    @Column(name = "account_number", nullable = false, unique = true, length = 12)
+    private String accountNumber;
 
     @Enumerated(EnumType.STRING)
     @Column(name = "wallet_type", nullable = false, length = 32)
@@ -90,6 +94,11 @@ public class Wallet {
         }
         if (this.ledgerBalance == null) {
             this.ledgerBalance = 0L;
+        }
+        if (this.accountNumber == null || this.accountNumber.isBlank()) {
+            // Fallback for legacy builders/tests; production always sets via WalletService.
+            this.accountNumber = String.format("8820%08d",
+                Math.abs(java.util.UUID.randomUUID().hashCode()) % 100_000_000);
         }
     }
 
@@ -159,5 +168,17 @@ public class Wallet {
 
     public void close() {
         getState().close(this);
+    }
+
+    /** OCP: status mapping lives in domain, service just calls this. */
+    public void transitionTo(com.minidigitalwallet.entity.enums.WalletStatus newStatus) {
+        if (this.status == newStatus) {
+            return;
+        }
+        switch (newStatus) {
+            case ACTIVE -> unfreeze();
+            case FROZEN -> freeze();
+            case CLOSED -> close();
+        }
     }
 }

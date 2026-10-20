@@ -1,0 +1,18 @@
+# Gitleaks configuration for the secret-scan CI job.
+#
+# Extends the built-in ruleset, so every default rule still applies; the two
+# allowlist entries below only cover values that were ever *documentation or
+# test fixtures*, never real credentials:
+#   1. the truncated sample token `eyJhbGciOiJIUzUxMiJ9...` in docs (old commits)
+#   2. the dev-only 64-hex JWT secret used by test fixtures
+# Real secrets must come from the environment (`APP_JWT_SECRET`) and are never
+# allowlisted, so any genuine leak still fails the job.
+[extend]
+useDefault = true
+
+[[allowlists]]
+description = "Documentation/test placeholders: sample JWT and dev-only test secret"
+regexes = [
+  '''eyJhbGciOiJIUzUxMiJ9\.\.\.''',
+  '''404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970''',
+]

@@ -50,13 +50,13 @@ $env:READ_P95_MS=30; k6 run read-balance.js
 ## 4. Đọc kết quả
 
 - `http_reqs` + `....../s` = TPS thực tế; `http_req_failed` = tỉ lệ lỗi.
-- `http_req_duration p(95)` so với cổng ở mục 3; vượt cổng → k6 exit 99.
+- `http_req_duration p(95)` so với cổng ở mục 3; vượt cổng => k6 exit 99.
 - File `summary-<kịch-bản>-<timestamp>.json` (đã gitignore) giữ lại để so sánh.
 
 ## 5. Lưu ý trung thực khi diễn giải
 
 - Mọi iteration ghi dùng `Idempotency-Key` duy nhất (xem `uniqueKey` trong
-  `common.js`). Dùng lại key sẽ nhận 409/replay nhanh bất thường → TPS ảo.
+  `common.js`). Dùng lại key sẽ nhận 409/replay nhanh bất thường => TPS ảo.
 - `write-topup` và `p2p-transfer` dồn vào 1 ví nguồn = hotspot 1 row
   (kịch bản khắc nghiệt nhất). KPI "P2P ngẫu nhiên 400-800 TPS" trong TARGET.md
   cần N ví nguồn, chưa có ở đây — muốn đo thì seed N user trong `setup()`

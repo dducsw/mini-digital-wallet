@@ -7,7 +7,7 @@ import com.minidigitalwallet.entity.PaymentMethod;
 import java.util.List;
 import java.util.UUID;
 
-public interface PaymentMethodService {
+public interface PaymentMethodService extends PaymentMethodOwnership {
 
     PaymentMethodResponse linkCard(LinkCardRequest request);
 
@@ -18,10 +18,4 @@ public interface PaymentMethodService {
     void revokePaymentMethod(UUID id);
 
     PaymentMethod getPaymentMethodEntity(UUID id);
-
-    /**
-     * DIP boundary: resolves an ACTIVE card and guarantees it belongs to the
-     * given wallet owner. TransferService must not query payment tables directly.
-     */
-    PaymentMethod requireOwnedCard(UUID cardId, String walletOwnerId);
 }

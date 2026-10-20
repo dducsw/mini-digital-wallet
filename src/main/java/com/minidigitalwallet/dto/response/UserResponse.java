@@ -12,8 +12,13 @@ public record UserResponse(
     String email,
     String fullName,
     UserStatus status,
-    Instant createdAt
+    Instant createdAt,
+    Boolean hasPin
 ) {
+    public UserResponse(UUID id, String username, String email, String fullName, UserStatus status, Instant createdAt) {
+        this(id, username, email, fullName, status, createdAt, false);
+    }
+
     public static UserResponse from(User user) {
         return new UserResponse(
             user.getId(),
@@ -21,7 +26,8 @@ public record UserResponse(
             user.getEmail(),
             user.getFullName(),
             user.getStatus(),
-            user.getCreatedAt()
+            user.getCreatedAt(),
+            user.getPinHash() != null
         );
     }
 }

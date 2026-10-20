@@ -1,4 +1,4 @@
-import { generateIdempotencyKey } from '../utils/formatters';
+import { generateIdempotencyKey, readErrorMessage } from '../utils/formatters';
 
 export const isUnauthorized = (res) => !!res && res.status === 401;
 
@@ -37,6 +37,34 @@ export const api = {
     });
   },
 
+  me: async (token) => {
+    return fetch('/api/v1/auth/me', { headers: getHeaders(token) });
+  },
+
+  refresh: async (refreshToken) => {
+    return fetch('/api/v1/auth/refresh', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+  },
+
+  logout: async (refreshToken) => {
+    return fetch('/api/v1/auth/logout', {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json' },
+      body: JSON.stringify({ refreshToken }),
+    });
+  },
+
+  setPin: async (pin, token) => {
+    return fetch('/api/v1/auth/pin', {
+      method: 'POST',
+      headers: getHeaders(token),
+      body: JSON.stringify({ pin }),
+    });
+  },
+
   // Wallets
   getWallets: async (ownerId, token) => {
     return fetch(`/api/v1/wallets?owner_id=${encodeURIComponent(ownerId)}`, {
@@ -44,15 +72,12 @@ export const api = {
     });
   },
 
-  createWallet: async ({ ownerId, currency = 'USD', walletType = 'USER' }, token) => {
+  createWallet: async (token) => {
+    // owner_id/currency/wallet_type are all derived server-side from the JWT.
     return fetch('/api/v1/wallets', {
       method: 'POST',
       headers: getHeaders(token),
-      body: JSON.stringify({
-        owner_id: ownerId,
-        currency,
-        wallet_type: walletType,
-      }),
+      body: JSON.stringify({ currency: 'USD' }),
     });
   },
 
@@ -86,11 +111,12 @@ export const api = {
     });
   },
 
-  // Transfers (Idempotent)
-  topUp: async ({ walletId, paymentMethodId, amount, description }, token) => {
+  // Transfers. Idempotency keys are supplied by callers so a retry reuses the
+  // same key (the caller clears it only after a confirmed response).
+  topUp: async ({ walletId, paymentMethodId, amount, description }, idempotencyKey, token) => {
     return fetch('/api/v1/transfers/topup', {
       method: 'POST',
-      headers: getHeaders(token, { 'Idempotency-Key': generateIdempotencyKey() }),
+      headers: getHeaders(token, { 'Idempotency-Key': idempotencyKey }),
       body: JSON.stringify({
         wallet_id: walletId,
         payment_method_id: paymentMethodId,
@@ -100,10 +126,12 @@ export const api = {
     });
   },
 
-  withdraw: async ({ walletId, paymentMethodId, amount, description }, token) => {
+  withdraw: async ({ walletId, paymentMethodId, amount, description, pin }, idempotencyKey, token) => {
+    const extraHeaders = { 'Idempotency-Key': idempotencyKey };
+    if (pin) extraHeaders['X-Transaction-Pin'] = pin;
     return fetch('/api/v1/transfers/withdraw', {
       method: 'POST',
-      headers: getHeaders(token, { 'Idempotency-Key': generateIdempotencyKey() }),
+      headers: getHeaders(token, extraHeaders),
       body: JSON.stringify({
         wallet_id: walletId,
         payment_method_id: paymentMethodId,
@@ -113,23 +141,92 @@ export const api = {
     });
   },
 
-  p2pTransfer: async ({ sourceWalletId, destinationWalletId, amount, description }, token) => {
+  p2pTransfer: async ({ sourceWalletId, destinationAccountNumber, amount, description, pin }, idempotencyKey, token) => {
+    const extraHeaders = { 'Idempotency-Key': idempotencyKey };
+    if (pin) extraHeaders['X-Transaction-Pin'] = pin;
     return fetch('/api/v1/transfers/p2p', {
       method: 'POST',
-      headers: getHeaders(token, { 'Idempotency-Key': generateIdempotencyKey() }),
+      headers: getHeaders(token, extraHeaders),
       body: JSON.stringify({
         source_wallet_id: sourceWalletId,
-        destination_wallet_id: destinationWalletId,
+        destination_account_number: destinationAccountNumber,
         amount,
         description,
       }),
     });
   },
 
-  // Ledger Entries
-  getLedgerEntries: async (walletId, token) => {
-    return fetch(`/api/v1/ledger/wallets/${walletId}/entries`, {
+  reverse: async ({ originalTransactionId, description }, idempotencyKey, token) => {
+    return fetch('/api/v1/transfers/reversals', {
+      method: 'POST',
+      headers: getHeaders(token, { 'Idempotency-Key': idempotencyKey }),
+      body: JSON.stringify({
+        original_transaction_id: originalTransactionId,
+        description,
+      }),
+    });
+  },
+
+  // Resolve 12-digit account number -> recipient preview before sending.
+  lookupWalletByAccountNumber: async (accountNumber, token) => {
+    const digits = String(accountNumber || '').replace(/\s+/g, '');
+    return fetch(`/api/v1/wallets/account/${encodeURIComponent(digits)}`, {
+      headers: getHeaders(token),
+    });
+  },
+
+  // Statements (paginated)
+  getStatement: async (walletId, { type, from, to, page = 0, size = 20 } = {}, token) => {
+    const params = new URLSearchParams({ page, size });
+    if (type) params.append('type', type);
+    if (from) params.append('from', from);
+    if (to) params.append('to', to);
+    return fetch(`/api/v1/ledger/wallets/${walletId}/statement?${params.toString()}`, {
+      headers: getHeaders(token),
+    });
+  },
+
+  exportStatementCsv: async (walletId, { type, from, to } = {}, token) => {
+    const params = new URLSearchParams();
+    if (type) params.append('type', type);
+    if (from) params.append('from', from);
+    if (to) params.append('to', to);
+    return fetch(`/api/v1/ledger/wallets/${walletId}/statement/export?${params.toString()}`, {
+      headers: getHeaders(token),
+    });
+  },
+
+  // Contacts
+  getContacts: async (token) => {
+    return fetch('/api/v1/contacts', {
+      headers: getHeaders(token),
+    });
+  },
+
+  createContact: async ({ accountNumber, nickname }, token) => {
+    return fetch('/api/v1/contacts', {
+      method: 'POST',
+      headers: getHeaders(token),
+      body: JSON.stringify({
+        account_number: accountNumber,
+        nickname,
+      }),
+    });
+  },
+
+  deleteContact: async (id, token) => {
+    return fetch(`/api/v1/contacts/${id}`, {
+      method: 'DELETE',
+      headers: getHeaders(token),
+    });
+  },
+
+  toggleFavoriteContact: async (id, token) => {
+    return fetch(`/api/v1/contacts/${id}/favorite`, {
+      method: 'PATCH',
       headers: getHeaders(token),
     });
   },
 };
+
+export { generateIdempotencyKey, readErrorMessage };

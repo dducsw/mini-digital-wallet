@@ -1,32 +1,34 @@
-# Kiến Trúc & Luồng Tương Tác Core Double-Entry Ledger (Phase 2)
+# Kiến Trúc & Luồng Giao Dịch Core Double-Entry Ledger
 
-Tài liệu thiết kế chi tiết hệ thống sổ cái kế toán kép (Double-Entry Bookkeeping), cơ chế khóa chống deadlock và luồng giao dịch tiền tệ an toàn trong ngân hàng số.
+Tài liệu thiết kế chi tiết về hệ thống Sổ Cái Kế Toán Kép (Double-Entry Bookkeeping), cơ chế khóa bi quan chống Deadlock và cách bảo vệ tính toàn vẹn dòng tiền trong **Mini Digital Wallet**.
 
 ---
 
-## 1. Nguyên Lý Kế Toán Kép & Bất Biến Số Dư (Invariants)
+## 1. Nguyên Lý Kế Toán Kép (Double-Entry Bookkeeping)
 
-Mọi giao dịch biến động số dư tài chính bắt buộc tuân thủ nguyên lý kế toán kép:
-- **Không bao giờ tạo hoặc phá hủy tiền từ hư vô**: Tiền chỉ chuyển dịch giữa các tài khoản/ví.
-- **Bất biến cân bằng (Balance Invariant)**: Tổng số tiền Ghi nợ (DEBIT) luôn bằng tổng số tiền Ghi có (CREDIT) trên từng mã giao dịch.
-  $$\sum \text{Amount}_{\text{DEBIT}} = \sum \text{Amount}_{\text{CREDIT}}$$
-- **Bất biến không âm (Non-negative Invariant)**: Ví người dùng (`USER`) không bao giờ được âm số dư khả dụng (`available_balance >= 0`). Ví hệ thống (`SYSTEM`) được phép âm tạm thời để phản ánh nguồn cấp vốn (Clearing/Settlement).
+Giả sử bạn chuyển 15 USD cho bạn của bạn:
+- Ở thế giới thực, tờ tiền 15 USD rời khỏi tay bạn và chuyển sang tay người bạn. Tổng số tiền trên thế giới không hề thay đổi.
+- Trong hệ thống ngân hàng, để mô phỏng sự thật đó, mọi giao dịch biến động số dư đều phải tuân thủ **Nguyên Lý Kế Toán Kép**:
+  1. **Tiền không bao giờ tự sinh ra hay tự biến mất**: Nó luôn luôn đi từ một nơi (ví A) đến một nơi khác (ví B).
+  2. **Bất biến cân bằng (Balance Invariant)**: Tổng số tiền Ghi nợ (`DEBIT`) luôn luôn bằng tổng số tiền Ghi có (`CREDIT`) trên từng giao dịch:
+     $$\sum \text{Amount}_{\text{DEBIT}} = \sum \text{Amount}_{\text{CREDIT}}$$
+  3. **Bất biến không âm (Non-negative Invariant)**: Ví của khách hàng (`USER`) không bao giờ được phép mang số dư âm (`available_balance >= 0`). Ví hệ thống (`SYSTEM`) được phép mang số dư âm vì nó đóng vai trò đại diện cho nguồn vốn đối ứng bên ngoài.
 
 ```mermaid
 flowchart LR
-    subgraph Transaction["Giao dịch Kế toán kép (Atomic Transaction)"]
+    subgraph Transaction["Giao Dịch Kế Toán Kép (Atomic Transaction)"]
         direction TB
-        subgraph SourceAccount["Tài khoản Nguồn (Source Wallet)"]
-            D["DEBIT (Ghi nợ) - Cents"]
-            D_BAL["Giảm Số dư (- Amount)"]
+        subgraph SourceAccount["Tài Khoản Nguồn (Ví A)"]
+            D["DEBIT (Ghi Nợ) - Cents"]
+            D_BAL["Số dư giảm: - Amount"]
         end
 
-        subgraph DestAccount["Tài khoản Đích (Destination Wallet)"]
-            C["CREDIT (Ghi có) - Cents"]
-            C_BAL["Tăng Số dư (+ Amount)"]
+        subgraph DestAccount["Tài Khoản Đích (Ví B)"]
+            C["CREDIT (Ghi Có) - Cents"]
+            C_BAL["Số dư tăng: + Amount"]
         end
 
-        D ---|Equal Amount| C
+        D ---|Số Tiền Bằng Nhau Tuyệt Đối| C
     end
 ```
 
@@ -36,238 +38,200 @@ flowchart LR
 
 ```mermaid
 erDiagram
-    wallets ||--o{ ledger_entries : "has balance movements (1:N)"
-    ledger_transactions ||--|{ ledger_entries : "contains entries (1:N)"
+    wallets ||--o{ ledger_entries : "chứa các biến động số dư (1:N)"
+    ledger_transactions ||--|{ ledger_entries : "chứa các bút toán con (1:N)"
 
     wallets {
-        uuid id PK "gen_random_uuid()"
-        varchar user_id "Owner ID"
-        varchar wallet_type "USER or SYSTEM"
+        uuid id PK "Khóa chính UUIDv4"
+        varchar user_id "ID chủ ví"
+        varchar account_number UK "STK 12 chữ số duy nhất, đầu 8820"
+        varchar wallet_type "USER hoặc SYSTEM"
         varchar currency "ISO 4217 (USD)"
-        bigint available_balance "Spendable cents (>= 0)"
-        bigint ledger_balance "Settled ledger cents"
+        bigint available_balance "Số dư khả dụng (cents, >= 0)"
+        bigint ledger_balance "Số dư kế toán đã chốt"
         varchar status "ACTIVE, FROZEN, CLOSED"
-        bigint version "Optimistic lock version"
-        timestamptz created_at "Created timestamp"
-        timestamptz updated_at "Updated timestamp"
+        bigint version "Khóa lạc quan OCC"
+        timestamptz created_at "Thời điểm tạo"
+        timestamptz updated_at "Cập nhật cuối"
     }
 
     ledger_transactions {
-        uuid id PK "gen_random_uuid()"
+        uuid id PK "Khóa chính UUIDv4"
         varchar reference_id UK "UNIQUE, chống trùng giao dịch"
         varchar transaction_type "TOPUP, WITHDRAW, P2P_TRANSFER, REVERSAL"
-        bigint amount "Positive minor units (cents)"
+        bigint amount "Số tiền nguyên (cents > 0)"
         varchar currency "USD"
-        varchar description "Ghi chú"
+        varchar description "Nội dung chuyển tiền"
         uuid reversal_of_transaction_id FK "Trỏ về tx gốc nếu là REVERSAL"
-        timestamptz created_at "Created timestamp"
+        timestamptz created_at "Thời điểm tạo"
     }
 
     ledger_entries {
-        uuid id PK "gen_random_uuid()"
-        uuid transaction_id FK "References ledger_transactions.id"
-        uuid wallet_id FK "References wallets.id"
-        varchar entry_type "DEBIT or CREDIT"
-        bigint amount "Positive minor units (cents)"
+        uuid id PK "Khóa chính UUIDv4"
+        uuid transaction_id FK "Khóa ngoại trỏ về ledger_transactions.id"
+        uuid wallet_id FK "Khóa ngoại trỏ về wallets.id"
+        varchar entry_type "DEBIT hoặc CREDIT"
+        bigint amount "Số tiền nguyên (cents > 0)"
         int line_no "1 = DEBIT nguồn, 2 = CREDIT đích; UNIQUE(transaction_id, line_no)"
-        bigint balance_after "Snapshot balance post-entry"
-        timestamptz created_at "Created timestamp"
+        bigint balance_after "Số dư tức thời ngay sau khi ghi dòng này"
+        timestamptz created_at "Thời điểm tạo"
     }
 ```
 
 ---
 
-## 3. Kiến Trúc Concurrency & Cơ Chế Khóa Chống Deadlock
+## 3. Cơ Chế Khóa Bi Quan & Triệt Tiêu Deadlock
 
-Khi hai người dùng chuyển tiền chéo nhau đồng thời:
-- Luồng 1: Ví A chuyển sang Ví B.
-- Luồng 2: Ví B chuyển sang Ví A.
+### Vấn đề Deadlock là gì?
+Khi hai người bạn A và B cùng lúc chuyển tiền cho nhau trên 2 điện thoại khác nhau:
+- Luồng 1 (từ ví A sang ví B): Cần khóa ví A trước, rồi khóa ví B sau.
+- Luồng 2 (từ ví B sang ví A): Cần khóa ví B trước, rồi khóa ví A sau.
 
-Nếu khóa theo thứ tự request (`A -> B` và `B -> A`), cơ sở dữ liệu sẽ gặp Deadlock (`ORA-00060 / PG Deadlock detected`).
+Nếu cả 2 luồng chạy cùng một phần nghìn giây: Luồng 1 giữ A và đợi B; Luồng 2 giữ B và đợi A. Cả hai bên chờ nhau mãi mãi gây **Deadlock** treo cứng cơ sở dữ liệu!
 
-### Giải pháp kỹ thuật:
-1. **Deterministic Lock Ordering**: Luôn sắp xếp thứ tự khóa bi-directional theo thứ tự tự nhiên của khóa chính UUID (`UUID.compareTo`):
-   $$\text{First Lock} = \min(\text{srcId}, \text{dstId}), \quad \text{Second Lock} = \max(\text{srcId}, \text{dstId})$$
-2. **Pessimistic Lock (`PESSIMISTIC_WRITE`)**: Sử dụng lệnh SQL `SELECT ... FOR UPDATE` đảm bảo độc quyền ghi.
-3. **Resilience Retry Layer (`@Retryable`)**: `LedgerFacade` tự động retry tối đa 3 lần (backoff 100ms $\times$ 2, mỗi lần là transaction mới) cho cả họ lỗi khóa transient: `CannotAcquireLockException`, `PessimisticLockingFailureException`, `DeadlockLoserDataAccessException`, `ConcurrencyFailureException`. Cố tình **không dùng `@Recover`** để lỗi nghiệp vụ (`InsufficientFunds`, trùng `reference_id`) luôn lan truyền nguyên dạng thay vì bị bọc nhầm thành 503.
+### Giải pháp trong hệ thống:
+1. **Sắp xếp thứ tự khóa nhất quán (Deterministic Lock Ordering)**:
+   - Không bao giờ khóa theo thứ tự người gửi/người nhận.
+   - So sánh chuỗi UUID của 2 ví theo bảng chữ cái:
+     `Khóa Thứ Nhất = min(UUID_A, UUID_B), Khóa Thứ Hai = max(UUID_A, UUID_B)`
+   - Dù là A chuyển cho B hay B chuyển cho A, cả hai luồng đều bắt buộc phải xin khóa ví có UUID nhỏ hơn trước. Điều kiện chờ đợi vòng tròn bị phá vỡ hoàn toàn!
+2. **Khóa độc quyền ghi (Pessimistic Lock)**:
+   - Sử dụng câu lệnh SQL: `SELECT ... FOR UPDATE` thông qua `@Lock(LockModeType.PESSIMISTIC_WRITE)` của JPA.
+3. **Lớp phục hồi tự động (`@Retryable`)**:
+   - `LedgerFacade` tự động thử lại tối đa 3 lần nếu có tranh chấp lock tạm thời giữa các luồng, mỗi lần thử lại chạy trên một transaction sạch sẽ.
 
 ```mermaid
 flowchart TD
-    REQ["Transfer Request (Src, Dst, Amount)"] --> FACADE["LedgerFacade (@Retryable)"]
-    FACADE --> ORDER{"Compare UUIDs (srcId, dstId)"}
-    ORDER -->|srcId &lt; dstId| LOCK_AB["Lock srcId FIRST -> Lock dstId SECOND"]
-    ORDER -->|srcId &gt; dstId| LOCK_BA["Lock dstId FIRST -> Lock srcId SECOND"]
-    LOCK_AB --> EXEC["Execute Debit & Credit Entries"]
+    REQ["Yêu cầu chuyển tiền: Ví A <-> Ví B"] --> FACADE["LedgerFacade (@Retryable)"]
+    FACADE --> ORDER{"So sánh UUID(A) và UUID(B)"}
+    ORDER -->|UUID(A) &lt; UUID(B)| LOCK_AB["Khóa Ví A trước -> Khóa Ví B sau"]
+    ORDER -->|UUID(B) &lt; UUID(A)| LOCK_BA["Khóa Ví B trước -> Khóa Ví A sau"]
+    LOCK_AB --> EXEC["Ghi bút toán Debit & Credit"]
     LOCK_BA --> EXEC
-    EXEC --> COMMIT["Commit DB Transaction"]
+    EXEC --> COMMIT["Commit Transaction & Nhả Khóa"]
 ```
 
 ---
 
-## 4. Luồng Chuyển Tiền P2P Transfer (P2P Sequence)
+## 4. Sequence Diagram: Luồng Chuyển Tiền P2P
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as HTTP Client
+    actor KhachHang as Client
     participant TC as TransferController
-    participant TS as TransferServiceImpl
-    participant LF as LedgerFacade
-    participant LS as LedgerServiceImpl
+    participant LF as LedgerFacade (@Retryable)
+    participant LS as LedgerServiceImpl (@Transactional)
     participant WR as WalletRepository
     participant LTR as LedgerTransactionRepository
     participant DB as PostgreSQL
 
-    Client->>TC: POST /api/v1/transfers/p2p (sourceId, destId, amount, refId)
-    TC->>TS: transfer(TransferRequest, idempotencyKey)
-    TS->>LF: executeTransferWithRetry(refId, P2P_TRANSFER, amount, srcId, dstId)
-    LF->>LS: executeTransfer(refId, P2P_TRANSFER, amount, srcId, dstId)
+    KhachHang->>TC: POST /api/v1/transfers/p2p (Src, Dst, $15, PIN)
+    TC->>LF: executeTransferWithRetry(...)
+    LF->>LS: executeTransfer(...)
 
-    Note over LS: Deterministic Ordering: min(src, dst) -> max(src, dst)
+    Note over LS: 1. Sắp xếp thứ tự khóa: min(src, dst) -> max(src, dst)
     LS->>WR: findByIdForUpdate(firstId)
     WR->>DB: SELECT * FROM wallets WHERE id = ? FOR UPDATE
-    DB-->>WR: Lock acquired (firstWallet)
+    DB-->>WR: Đã khóa ví thứ nhất
 
     LS->>WR: findByIdForUpdate(secondId)
     WR->>DB: SELECT * FROM wallets WHERE id = ? FOR UPDATE
-    DB-->>WR: Lock acquired (secondWallet)
+    DB-->>WR: Đã khóa ví thứ hai
 
-    Note over LS: Validation: status == ACTIVE && src.availableBalance >= amount
-    alt Insufficient Funds
-        LS-->>LF: throw InsufficientFundsException (400)
-        LF-->>TC: Bubbled up
-        TC-->>Client: HTTP 400 ProblemDetail (insufficient-funds)
-    else Balance Valid
-        LS->>LS: src.debit(amount) / dst.credit(amount) + save cả 2 ví
-        LS->>LTR: save(LedgerTransaction + 2 entries qua cascade)
-        LTR->>DB: INSERT INTO ledger_transactions (...)
-        LTR->>DB: INSERT INTO ledger_entries (DEBIT src line_no=1, CREDIT dst line_no=2)
+    Note over LS: 2. Kiểm tra trạng thái ví ACTIVE và ví nguồn đủ tiền
+    alt Không đủ tiền (Insufficient Funds)
+        LS-->>TC: throw InsufficientFundsException (HTTP 400)
+        TC-->>KhachHang: HTTP 400 ProblemDetail
+    else Đủ tiền hợp lệ
+        Note over LS: 3. Trừ tiền ví nguồn, cộng tiền ví đích
+        LS->>DB: UPDATE wallets SET available_balance = balance - 1500 WHERE id = srcId
+        LS->>DB: UPDATE wallets SET available_balance = balance + 1500 WHERE id = dstId
 
-        DB-->>LS: Transaction committed
-        LS-->>LF: LedgerTransaction
-        LF-->>TS: LedgerTransaction
-        TS-->>TC: TransferResponse
-        TC-->>Client: HTTP 201 Created (JSON)
+        Note over LS: 4. Ghi 1 dòng Transaction Header và 2 dòng Entries
+        LS->>LTR: save(Transaction + Entries)
+        LTR->>DB: INSERT INTO ledger_transactions (id, type=P2P_TRANSFER, amount=1500)
+        LTR->>DB: INSERT INTO ledger_entries (DEBIT srcId, line_no=1, amount=1500)
+        LTR->>DB: INSERT INTO ledger_entries (CREDIT dstId, line_no=2, amount=1500)
+
+        DB-->>LS: Transaction Committed (ACID)
+        LS-->>LF: Transfer thành công
+        LF-->>TC: TransferResponse DTO
+        TC-->>KhachHang: HTTP 201 Created
     end
 ```
 
 ---
 
-## 5. Luồng Nạp Tiền (Top-Up) & Rút Tiền (Withdrawal)
+## 5. Sequence Diagram: Luồng Nạp Tiền (Top-Up) & Rút Tiền (Withdrawal)
 
-Giao dịch Nạp và Rút tiền dùng chung ví hệ thống đối ứng cố định `SYS_EXTERNAL_SETTLEMENT` (`00000000-0000-0000-0000-000000000001`) để bảo toàn nguyên lý kế toán kép:
-- **Top-Up**: `DEBIT` ví `SYS_EXTERNAL_SETTLEMENT` $\rightarrow$ `CREDIT` ví người dùng.
-- **Withdrawal**: `DEBIT` ví người dùng $\rightarrow$ `CREDIT` ví `SYS_EXTERNAL_SETTLEMENT`.
+Giao dịch Nạp và Rút tiền đều sử dụng ví hệ thống `SYS_EXTERNAL_SETTLEMENT` (`00000000-0000-0000-0000-000000000001`) làm tài khoản đối ứng:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as HTTP Client
+    actor KhachHang as Client
     participant TC as TransferController
-    participant TS as TransferServiceImpl
-    participant LF as LedgerFacade
-    participant LS as LedgerServiceImpl
-    participant WR as WalletRepository
+    participant LS as LedgerServiceImpl (@Transactional)
+    participant DB as PostgreSQL
 
     rect rgb(240, 248, 255)
-    Note over Client, WR: TOP-UP FLOW
-    Client->>TC: POST /api/v1/transfers/topup (walletId, paymentMethodId, amount)
-    TC->>TS: topUp(TopUpRequest, idempotencyKey)
-    TS->>TS: ownedCard(wallet, paymentMethodId) — check ACTIVE + chính chủ
-    TS->>LF: executeTransferWithRetry(ref, TOPUP, SYS_SETTLEMENT -> userWallet)
-    LF->>LS: executeTransfer(...) trong @Transactional
-    LS-->>TC: HTTP 201 Created (TransferResponse)
+    Note over KhachHang, DB: LUỒNG NẠP TIỀN (TOP-UP)
+    KhachHang->>TC: POST /transfers/topup ($500 từ thẻ Visa)
+    TC->>LS: executeTransfer(SYS_EXTERNAL_SETTLEMENT -> ViKhachHang)
+    LS->>DB: INSERT ledger_entries (DEBIT SYS_SETTLEMENT, $500, line_no=1)
+    LS->>DB: INSERT ledger_entries (CREDIT ViKhachHang, $500, line_no=2)
+    LS->>DB: UPDATE wallets SET balance = balance + $500
+    DB-->>TC: Commit OK
+    TC-->>KhachHang: HTTP 201 Created (Số dư tăng lên)
     end
 
     rect rgb(255, 245, 245)
-    Note over Client, WR: WITHDRAWAL FLOW
-    Client->>TC: POST /api/v1/transfers/withdraw (walletId, paymentMethodId, amount)
-    TC->>TS: withdraw(WithdrawRequest, idempotencyKey)
-    TS->>TS: ownedCard(wallet, paymentMethodId) — check ACTIVE + chính chủ
-    TS->>LF: executeTransferWithRetry(ref, WITHDRAW, userWallet -> SYS_SETTLEMENT)
-    LF->>LS: executeTransfer(...) trong @Transactional
-    LS-->>TC: HTTP 201 Created (TransferResponse)
+    Note over KhachHang, DB: LUỒNG RÚT TIỀN (WITHDRAWAL)
+    KhachHang->>TC: POST /transfers/withdraw ($200 về thẻ Visa)
+    TC->>LS: executeTransfer(ViKhachHang -> SYS_EXTERNAL_SETTLEMENT)
+    LS->>DB: INSERT ledger_entries (DEBIT ViKhachHang, $200, line_no=1)
+    LS->>DB: INSERT ledger_entries (CREDIT SYS_SETTLEMENT, $200, line_no=2)
+    LS->>DB: UPDATE wallets SET balance = balance - $200
+    DB-->>TC: Commit OK
+    TC-->>KhachHang: HTTP 201 Created (Số dư giảm đi)
     end
 ```
 
 ---
 
-## 6. Luồng Đảo Ngược Giao Dịch (Reversal Sequence)
+## 6. Sequence Diagram: Luồng Hoàn Tiền (Reversal)
 
-Giao dịch trong sổ cái ngân hàng **không bao giờ bị DELETE hoặc UPDATE trực tiếp**. Để sửa sai hoặc hủy thanh toán, hệ thống ghi thêm giao dịch đảo ngược (`REVERSAL`) nhằm triệt tiêu hiệu ứng tài chính:
+Giao dịch cũ hoàn toàn giữ nguyên tính bất biến. Hệ thống tạo một giao dịch mới trỏ về giao dịch cũ và đảo ngược bút toán:
 
 ```mermaid
 sequenceDiagram
     autonumber
-    actor Client as HTTP Client
+    actor KhachHang as Client
     participant TC as TransferController
-    participant TS as TransferServiceImpl
-    participant LF as LedgerFacade (@Retryable)
     participant LS as LedgerServiceImpl (@Transactional)
-    participant LTR as LedgerTransactionRepository
+    participant DB as PostgreSQL
 
-    Client->>TC: POST /api/v1/transfers/reversals (originalTxId, reason)
-    TC->>TS: reverse(originalTxId, idempotencyKey, description)
-    TS->>LF: reverseWithRetry(originalTxId, reversalRef, description)
-    LF->>LS: reverseTransfer(originalTxId, reversalRef, description)
-    LS->>LTR: findById(originalTxId)
-    LTR-->>LS: originalTx (không phải REVERSAL, chưa từng bị đảo)
-    Note over LS: Đọc ví nguồn/đích gốc từ 2 entries, đảo chiều dòng tiền
-    LS->>LS: executeTransfer(reversalRef, originalDest -> originalSource, REVERSAL)
-    Note over LS: Gắn reversal.reversal_of_transaction_id = originalTxId, save
-    LS-->>TC: HTTP 201 Created (TransferResponse, REVERSAL)
+    KhachHang->>TC: POST /transfers/reversals (originalTxId: TX123)
+    TC->>LS: reverseTransfer(TX123)
+    Note over LS: 1. Đọc giao dịch gốc và kiểm tra quyền sở hữu<br/>2. Kiểm tra chưa từng bị hoàn tiền trước đây
+    Note over LS: 3. Đảo ngược dòng tiền: DEBIT người nhận cũ, CREDIT người gửi cũ
+    LS->>DB: INSERT INTO ledger_transactions (type=REVERSAL, reversal_of=TX123)
+    LS->>DB: INSERT INTO ledger_entries (DEBIT ViNhanCu, line_no=1)
+    LS->>DB: INSERT INTO ledger_entries (CREDIT ViGuiCu, line_no=2)
+    DB-->>TC: Commit thành công (Chỉ mục UNIQUE ngăn chặn hoàn tiền 2 lần)
+    TC-->>KhachHang: HTTP 201 Created (Hoàn tiền hoàn tất)
 ```
 
 ---
 
-## 7. Vòng Đời Giao Dịch Sổ Cái (Ledger Transaction Lifecycle)
+## 7. Vì Sao `@Retryable` Phải Tách Riêng Khỏi `@Transactional`?
 
-Bảng `ledger_transactions` hiện **không có cột trạng thái** — mỗi bản ghi đã commit là cuối cùng (bất biến). Vòng đời thực tế:
+Câu hỏi kinh điển dành cho fresher: *"Tại sao không viết cả `@Retryable` và `@Transactional` lên cùng một hàm trong `LedgerServiceImpl`?"*.
 
-```mermaid
-stateDiagram-v2
-    [*] --> POSTED : executeTransfer commit (2 entries cân bằng)
-    POSTED --> REVERSED : reverseTransfer commit tx REVERSAL mới trỏ về tx gốc
-    REVERSED --> [*] : Terminal (không được đảo tiếp, không đảo REVERSAL)
-    POSTED --> [*] : Terminal (không đảo)
-```
-
-- **POSTED** (ngầm định): đã commit là xong; không có `PENDING`/`FAILED` lưu DB — request lỗi chỉ ném exception, không để lại bản ghi.
-- **REVERSED**: trạng thái logic của tx gốc sau khi đã tồn tại một tx `REVERSAL` trỏ về nó (chặn đảo lần 2 bằng `existsByReversalOfTransactionId`).
-
----
-
-## 8. Vì Sao `@Retryable` Nằm Ở `LedgerFacade`, Không Nằm Chung `LedgerService`
-
-Câu hỏi thường gặp: tại sao không gắn `@Retryable` trực tiếp lên `LedgerService.executeTransfer` cho gọn?
-
-**Trả lời ngắn**: vì cả hai annotation đều là proxy bọc ngoài method, và transaction chết không retry được.
-
-```mermaid
-flowchart TD
-    subgraph WRONG["SAI: chung 1 bean"]
-        direction TB
-        R1["@Retryable + @Transactional<br/>cùng method"] --> D1["Lỗi lock 40P01:<br/>transaction bị đánh dấu rollback-only"]
-        D1 --> R2["Retry chạy lại trên ĐÚNG<br/>transaction đã chết"]
-        R2 --> F1["TransactionRollbackException:<br/>retry bao nhiêu lần cũng thất bại"]
-    end
-    subgraph RIGHT["ĐÚNG: tách 2 bean (code hiện tại)"]
-        direction TB
-        FACADE["LedgerFacade<br/>(chỉ @Retryable, không transaction)"]
-        SVC["LedgerService<br/>(@Transactional READ_COMMITTED)"]
-        FACADE -->|"lần 1"| SVC
-        SVC -.->|"lỗi lock → transaction chết bị vứt"| FACADE
-        FACADE -->|"retry: mở transaction MỚI sạch"| SVC
-        SVC --> OK["Commit thành công"]
-    end
-```
-
-Chi tiết:
-
-1. Khi DB ném lỗi deadlock, `TransactionInterceptor` đánh dấu transaction hiện tại là **rollback-only** — transaction này đã chết, chỉ còn chờ rollback.
-2. Nếu `@Retryable` bọc cùng method đó, lần retry sẽ thực thi lại **trên đúng transaction chết này** thay vì mở cái mới → nhận `TransactionRollbackException` ngay lập tức.
-3. Tách `LedgerFacade` (chỉ retry, không transaction) gọi sang `LedgerService` (chỉ transaction, không retry): mỗi lần retry đi qua proxy transaction từ đầu nên luôn được cấp connection + snapshot mới sạch sẽ.
-
-**Quy tắc nhớ**: `@Retryable` phải bọc **ngoài** `@Transactional`, trên **bean khác nhau**. (Muốn gộp chung bean thì phải tự mở `REQUIRES_NEW` thủ công — phức tạp và dễ sai hơn nhiều.)
-
-> Liên quan: cũng vì lý do "không nuốt lỗi", Facade cố tình **không dùng `@Recover`** — từng có `@Recover(Exception)` bọc mọi lỗi (kể cả `InsufficientFundsException` ngay lần đầu) thành 503, làm test overdraft đỏ. Xem mục 3 và 5.2.
+- **Bản chất Spring Proxy**: Khi một transaction trong Spring gặp lỗi Deadlock ở tầng DB, Spring sẽ đánh dấu transaction đó là **Rollback-Only** (đã hỏng, không thể commit nữa).
+- Nếu `@Retryable` nằm chung trên cùng một bean: Lần thử lại (retry) sẽ chạy tiếp trên **chính transaction đã bị đánh dấu hỏng đó** $\rightarrow$ Nhận ngay ngoại lệ `TransactionRollbackException` và retry hoàn toàn vô ích.
+- Khi tách ra 2 Bean riêng:
+  - `LedgerFacade` nằm ngoài, mang `@Retryable`.
+  - `LedgerServiceImpl` nằm trong, mang `@Transactional`.
+  - Khi `LedgerServiceImpl` báo lỗi deadlock, transaction cũ bị rollback và hủy bỏ. `LedgerFacade` bắt được lỗi và gọi lại hàm, Spring sẽ mở một transaction hoàn toàn mới sạch sẽ.

@@ -6,14 +6,10 @@ export const formatCentsToUSD = (cents) => {
   }).format(cents / 100);
 };
 
-export const formatWalletAccountNumber = (uuid) => {
-  if (!uuid) return '8820 0000 0000';
-  let hash = 0;
-  for (let i = 0; i < uuid.length; i++) {
-    hash = (hash * 31 + uuid.charCodeAt(i)) >>> 0;
-  }
-  const numStr = (882000000000n + BigInt(hash)).toString().slice(0, 12);
-  return `${numStr.slice(0, 4)} ${numStr.slice(4, 8)} ${numStr.slice(8, 12)}`;
+// "882012345678" -> "8820 1234 5678" for readable account-number inputs.
+export const formatAccountInput = (raw) => {
+  const digits = String(raw || '').replace(/\D/g, '').slice(0, 12);
+  return digits.replace(/(\d{4})(?=\d)/g, '$1 ').trim();
 };
 
 export const generateIdempotencyKey = () => {
@@ -21,4 +17,10 @@ export const generateIdempotencyKey = () => {
     return crypto.randomUUID();
   }
   return 'idemp-' + Math.random().toString(36).substring(2, 15) + '-' + Date.now();
+};
+
+// Extract a human-readable message from an RFC 7807 error response.
+export const readErrorMessage = async (res, fallback) => {
+  const err = await res.json().catch(() => ({}));
+  return err.detail || fallback;
 };

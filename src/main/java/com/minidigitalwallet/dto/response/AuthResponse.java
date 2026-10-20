@@ -9,9 +9,12 @@ public record AuthResponse(
     UUID userId,
     String username,
     String email,
-    UUID defaultWalletId
+    UUID defaultWalletId,
+    String refreshToken,
+    long refreshExpiresIn
 ) {
-    public static AuthResponse of(String accessToken, long expiresIn, UserResponse user, UUID defaultWalletId) {
+    public static AuthResponse of(String accessToken, long expiresIn, UserResponse user,
+                                  UUID defaultWalletId, String refreshToken, long refreshExpiresIn) {
         return new AuthResponse(
             accessToken,
             "Bearer",
@@ -19,7 +22,9 @@ public record AuthResponse(
             user.id(),
             user.username(),
             user.email(),
-            defaultWalletId
+            defaultWalletId,
+            refreshToken,
+            refreshExpiresIn
         );
     }
 }

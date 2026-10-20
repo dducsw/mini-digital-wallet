@@ -1,33 +1,16 @@
 import React from 'react';
-import { CreditCard, Lock, Unlock, Copy, Check, Plus } from 'lucide-react';
-import { formatCentsToUSD, formatWalletAccountNumber } from '../../utils/formatters';
+import { Lock, Unlock, Copy, Check } from 'lucide-react';
+import { formatCentsToUSD } from '../../utils/formatters';
 
-export default function WalletCard({
-  wallet,
-  copied,
-  onCopyId,
-  onToggleFreeze,
-  onCreateWalletClick,
-}) {
-  if (!wallet) {
-    return (
-      <div className="white-card empty-placeholder">
-        <div className="empty-icon-box">
-          <CreditCard size={24} />
-        </div>
-        <h3 style={{ fontSize: '17px', fontWeight: 700, marginBottom: '6px' }}>
-          No USD Wallet Found
-        </h3>
-        <p style={{ color: 'var(--text-muted)', fontSize: '13px', marginBottom: '18px' }}>
-          Create an active USD digital wallet to start transacting.
-        </p>
-        <button className="btn btn-primary" onClick={onCreateWalletClick}>
-          <Plus size={15} /> Create Wallet
-        </button>
-      </div>
-    );
+const formatAccountNo = (accountNumber) => {
+  const digits = String(accountNumber || '').replace(/\D/g, '');
+  if (/^[0-9]{12}$/.test(digits)) {
+    return `${digits.slice(0, 4)} ${digits.slice(4, 8)} ${digits.slice(8, 12)}`;
   }
+  return digits || '—';
+};
 
+export default function WalletCard({ wallet, copied, onCopyId, onToggleFreeze }) {
   return (
     <div className="hero-balance-card">
       <div className="hero-top-row">
@@ -41,10 +24,10 @@ export default function WalletCard({
         <div style={{ display: 'flex', alignItems: 'center', gap: '8px' }}>
           <span
             className={`status-badge-pill ${
-              wallet.status === 'ACTIVE' ? 'badge-active-white' : 'badge-frozen-white'
+              wallet.account_status === 'ACTIVE' ? 'badge-active-white' : 'badge-frozen-white'
             }`}
           >
-            {wallet.status}
+            {wallet.account_status}
           </span>
           <button
             className="btn btn-sm"
@@ -54,10 +37,10 @@ export default function WalletCard({
               border: '1px solid rgba(255, 255, 255, 0.35)',
             }}
             onClick={onToggleFreeze}
-            disabled={wallet.status === 'CLOSED'}
-            title={wallet.status === 'CLOSED' ? 'Closed wallets cannot change status' : undefined}
+            disabled={wallet.account_status === 'CLOSED'}
+            title={wallet.account_status === 'CLOSED' ? 'Closed wallets cannot change status' : undefined}
           >
-            {wallet.status === 'ACTIVE' ? (
+            {wallet.account_status === 'ACTIVE' ? (
               <>
                 <Lock size={13} /> Freeze
               </>
@@ -89,7 +72,7 @@ export default function WalletCard({
             Account No:
           </span>
           <span style={{ fontFamily: 'var(--font-mono)', fontWeight: 700, letterSpacing: '0.06em' }}>
-            {formatWalletAccountNumber(wallet.id)}
+            {formatAccountNo(wallet.account_number)}
           </span>
           <button
             className="btn btn-sm"
@@ -100,15 +83,15 @@ export default function WalletCard({
               color: '#ffffff',
               border: '1px solid rgba(255, 255, 255, 0.35)',
             }}
-            onClick={() => onCopyId(wallet.id)}
-            title="Copy backend Wallet ID (UUID) for transfers"
+            onClick={() => onCopyId(String(wallet.account_number || '').replace(/\s+/g, ''))}
+            title="Copy 12-digit account number for P2P transfers"
           >
-            {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy ID</>}
+            {copied ? <><Check size={11} /> Copied</> : <><Copy size={11} /> Copy</>}
           </button>
         </div>
 
         <div style={{ fontSize: '12px' }}>
-          <span>Type: <strong>{wallet.account_type || wallet.wallet_type || 'PERSONAL'}</strong></span>
+          <span>Type: <strong>{wallet.wallet_type || 'USER'}</strong></span>
         </div>
       </div>
     </div>

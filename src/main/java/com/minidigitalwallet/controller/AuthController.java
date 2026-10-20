@@ -1,6 +1,7 @@
 package com.minidigitalwallet.controller;
 
 import com.minidigitalwallet.dto.request.LoginRequest;
+import com.minidigitalwallet.dto.request.RefreshRequest;
 import com.minidigitalwallet.dto.request.RegisterRequest;
 import com.minidigitalwallet.dto.response.AuthResponse;
 import com.minidigitalwallet.dto.response.UserResponse;
@@ -32,9 +33,49 @@ public class AuthController {
         return ResponseEntity.ok(response);
     }
 
+    @PostMapping("/refresh")
+    public ResponseEntity<AuthResponse> refresh(@Valid @RequestBody RefreshRequest request) {
+        return ResponseEntity.ok(authService.refresh(request.refreshToken()));
+    }
+
+    @PostMapping("/logout")
+    public ResponseEntity<Void> logout(@Valid @RequestBody RefreshRequest request) {
+        authService.logout(request.refreshToken());
+        return ResponseEntity.noContent().build();
+    }
+
+    @PostMapping("/logout-all")
+    public ResponseEntity<Void> logoutAll(@AuthenticationPrincipal UserPrincipal principal) {
+        if (principal == null) {
+            throw new com.minidigitalwallet.exception.AppException(
+                "Authentication required",
+                HttpStatus.UNAUTHORIZED,
+                "auth-required"
+            );
+        }
+        authService.logoutAll(principal.getId());
+        return ResponseEntity.noContent().build();
+    }
+
     @GetMapping("/me")
     public ResponseEntity<UserResponse> getCurrentUser(@AuthenticationPrincipal UserPrincipal principal) {
         UserResponse response = authService.getCurrentUser(principal.getId());
         return ResponseEntity.ok(response);
+    }
+
+    @PostMapping("/pin")
+    public ResponseEntity<Void> setPin(
+        @Valid @RequestBody com.minidigitalwallet.dto.request.SetPinRequest request,
+        @AuthenticationPrincipal UserPrincipal principal
+    ) {
+        if (principal == null) {
+            throw new com.minidigitalwallet.exception.AppException(
+                "Authentication required",
+                HttpStatus.UNAUTHORIZED,
+                "auth-required"
+            );
+        }
+        authService.setPin(principal.getId(), request.pin());
+        return ResponseEntity.ok().build();
     }
 }

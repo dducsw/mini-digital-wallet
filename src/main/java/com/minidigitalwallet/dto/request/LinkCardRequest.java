@@ -9,7 +9,8 @@ import jakarta.validation.constraints.NotNull;
 import jakarta.validation.constraints.Pattern;
 
 public record LinkCardRequest(
-    @NotBlank(message = "owner_id is required")
+    // Optional: kept for backward compatibility. The controller always
+    // overrides it with the caller's principal (BOLA protection).
     @JsonProperty("owner_id")
     @JsonAlias({"user_id", "ownerId", "userId"})
     String ownerId,

@@ -4,12 +4,16 @@ import com.fasterxml.jackson.databind.ObjectMapper;
 import com.minidigitalwallet.dto.request.CreateWalletRequest;
 import com.minidigitalwallet.dto.request.UpdateWalletStatusRequest;
 import com.minidigitalwallet.dto.response.WalletResponse;
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
 import com.minidigitalwallet.exception.DuplicateRequestException;
 import com.minidigitalwallet.exception.GlobalExceptionHandler;
 import com.minidigitalwallet.exception.WalletNotFoundException;
+import com.minidigitalwallet.security.UserPrincipal;
 import com.minidigitalwallet.service.WalletService;
+import org.junit.jupiter.api.AfterEach;
+import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 import org.springframework.beans.factory.annotation.Autowired;
@@ -22,6 +26,8 @@ import org.springframework.context.annotation.FilterType;
 import org.springframework.context.annotation.Import;
 import org.springframework.http.MediaType;
 import org.springframework.boot.test.mock.mockito.MockBean;
+import org.springframework.security.authentication.UsernamePasswordAuthenticationToken;
+import org.springframework.security.core.context.SecurityContextHolder;
 import org.springframework.test.web.servlet.MockMvc;
 
 import java.time.Instant;
@@ -51,42 +57,66 @@ class WalletControllerTest {
     @MockBean
     private WalletService walletService;
 
+    private final UUID ownerId = UUID.randomUUID();
+
+    @BeforeEach
+    void setAuth() {
+        UserPrincipal principal = UserPrincipal.create(ownerId, "alice", UserRole.USER);
+        var auth = new UsernamePasswordAuthenticationToken(principal, null, principal.getAuthorities());
+        SecurityContextHolder.getContext().setAuthentication(auth);
+    }
+
+    @AfterEach
+    void clearAuth() {
+        SecurityContextHolder.clearContext();
+    }
+
     @Test
     @DisplayName("POST /api/v1/wallets should return 201 Created on valid request")
     void createWallet_Success() throws Exception {
         UUID id = UUID.randomUUID();
         WalletResponse response = new WalletResponse(
-            id, "USER_987654", WalletType.USER, WalletType.USER,
-            WalletStatus.ACTIVE, WalletStatus.ACTIVE,
+            id, ownerId.toString(), "882012345678", WalletType.USER,
+            WalletStatus.ACTIVE,
             0L, 0L, "USD", 0L, Instant.now(), Instant.now()
         );
 
         when(walletService.createWallet(any(CreateWalletRequest.class))).thenReturn(response);
 
-        CreateWalletRequest request = new CreateWalletRequest("USER_987654", "USD", WalletType.USER);
+        // owner_id optional: the controller always uses the caller's principal (BOLA fix).
+        CreateWalletRequest request = new CreateWalletRequest(null, "USD", WalletType.USER);
 
         mockMvc.perform(post("/api/v1/wallets")
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isCreated())
             .andExpect(jsonPath("$.id").value(id.toString()))
-            .andExpect(jsonPath("$.owner_id").value("USER_987654"))
+            .andExpect(jsonPath("$.owner_id").value(ownerId.toString()))
             .andExpect(jsonPath("$.currency").value("USD"))
             .andExpect(jsonPath("$.available_balance").value(0))
             .andExpect(jsonPath("$.ledger_balance").value(0))
-            .andExpect(jsonPath("$.status").value("ACTIVE"));
+            .andExpect(jsonPath("$.account_status").value("ACTIVE"));
     }
 
     @Test
-    @DisplayName("POST /api/v1/wallets should return 400 Bad Request with RFC 7807 when owner_id is missing")
-    void createWallet_MissingOwnerId_Returns400() throws Exception {
+    @DisplayName("POST /api/v1/wallets should ignore client owner_id and use the caller's principal")
+    void createWallet_IgnoresForeignOwnerId() throws Exception {
+        UUID id = UUID.randomUUID();
+        WalletResponse response = new WalletResponse(
+            id, ownerId.toString(), "882012345678", WalletType.USER,
+            WalletStatus.ACTIVE,
+            0L, 0L, "USD", 0L, Instant.now(), Instant.now()
+        );
+
+        when(walletService.createWallet(any(CreateWalletRequest.class))).thenReturn(response);
+
+        String body = "{\"owner_id\":\"USER_999999\",\"currency\":\"USD\"}";
+
         mockMvc.perform(post("/api/v1/wallets")
                 .contentType(MediaType.APPLICATION_JSON)
-                .content("{\"currency\":\"USD\"}"))
-            .andExpect(status().isBadRequest())
-            .andExpect(jsonPath("$.type").value("https://minidigitalwallet.com/errors/validation-error"))
-            .andExpect(jsonPath("$.title").value("Validation Error"))
-            .andExpect(jsonPath("$.status").value(400));
+                .content(body))
+            .andExpect(status().isCreated())
+            .andExpect(jsonPath("$.owner_id").value(ownerId.toString()));
     }
 
     @Test
@@ -111,8 +141,8 @@ class WalletControllerTest {
     void getWallet_Success() throws Exception {
         UUID id = UUID.randomUUID();
         WalletResponse response = new WalletResponse(
-            id, "USER_987654", WalletType.USER, WalletType.USER,
-            WalletStatus.ACTIVE, WalletStatus.ACTIVE,
+            id, ownerId.toString(), "882012345678", WalletType.USER,
+            WalletStatus.ACTIVE,
             25000L, 25000L, "USD", 1L, Instant.now(), Instant.now()
         );
 
@@ -142,8 +172,8 @@ class WalletControllerTest {
     void getWalletBalance_Success() throws Exception {
         UUID id = UUID.randomUUID();
         WalletResponse response = new WalletResponse(
-            id, "USER_987654", WalletType.USER, WalletType.USER,
-            WalletStatus.ACTIVE, WalletStatus.ACTIVE,
+            id, ownerId.toString(), "882012345678", WalletType.USER,
+            WalletStatus.ACTIVE,
             50000L, 50000L, "USD", 2L, Instant.now(), Instant.now()
         );
 
@@ -160,11 +190,12 @@ class WalletControllerTest {
     void updateWalletStatus_Success() throws Exception {
         UUID id = UUID.randomUUID();
         WalletResponse response = new WalletResponse(
-            id, "USER_987654", WalletType.USER, WalletType.USER,
-            WalletStatus.FROZEN, WalletStatus.FROZEN,
+            id, ownerId.toString(), "882012345678", WalletType.USER,
+            WalletStatus.FROZEN,
             0L, 0L, "USD", 1L, Instant.now(), Instant.now()
         );
 
+        when(walletService.getWalletOwnerId(id)).thenReturn(ownerId.toString());
         when(walletService.updateStatus(eq(id), any(UpdateWalletStatusRequest.class))).thenReturn(response);
 
         UpdateWalletStatusRequest request = new UpdateWalletStatusRequest(WalletStatus.FROZEN);
@@ -173,6 +204,6 @@ class WalletControllerTest {
                 .contentType(MediaType.APPLICATION_JSON)
                 .content(objectMapper.writeValueAsString(request)))
             .andExpect(status().isOk())
-            .andExpect(jsonPath("$.status").value("FROZEN"));
+            .andExpect(jsonPath("$.account_status").value("FROZEN"));
     }
 }

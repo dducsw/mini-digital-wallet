@@ -7,6 +7,7 @@ import com.minidigitalwallet.dto.response.AuthResponse;
 import com.minidigitalwallet.dto.response.WalletResponse;
 import com.minidigitalwallet.entity.User;
 import com.minidigitalwallet.entity.Wallet;
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.entity.enums.UserStatus;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
@@ -49,19 +50,29 @@ class AuthServiceTest {
     @Mock
     private WalletService walletService;
 
+    @Mock
+    private com.minidigitalwallet.security.LoginRateLimiter rateLimiter;
+
+    @Mock
+    private com.minidigitalwallet.service.RefreshTokenService refreshTokenService;
+
     private JwtProperties jwtProperties;
     private AuthService authService;
 
     @BeforeEach
     void setUp() {
         jwtProperties = new JwtProperties();
-        jwtProperties.setExpirationMs(86400000L);
+        jwtProperties.setSecret("404E635266556A586E3272357538782F413F4428472B4B6250645367566B5970");
+        jwtProperties.setExpirationMs(900000L);
+        jwtProperties.setRefreshExpirationMs(604800000L);
         authService = new AuthServiceImpl(
                 userRepository,
                 passwordEncoder,
                 jwtTokenProvider,
                 jwtProperties,
-                walletService
+                walletService,
+                rateLimiter,
+                refreshTokenService
         );
     }
 
@@ -101,7 +112,9 @@ class AuthServiceTest {
                 .updatedAt(Instant.now())
                 .build();
         when(walletService.createWallet(any(CreateWalletRequest.class))).thenReturn(WalletResponse.from(dummyWallet));
-        when(jwtTokenProvider.generateToken(userId, "bob_smith")).thenReturn("mock-jwt-token");
+        when(jwtTokenProvider.generateToken(userId, "bob_smith", UserRole.USER)).thenReturn("mock-jwt-token");
+        when(refreshTokenService.issue(userId))
+            .thenReturn(new com.minidigitalwallet.service.RefreshTokenService.IssuedToken("raw-refresh", java.time.Instant.now().plusMillis(604800000L)));
 
         AuthResponse response = authService.register(request);
 
@@ -110,6 +123,7 @@ class AuthServiceTest {
         assertEquals("Bearer", response.tokenType());
         assertEquals(userId, response.userId());
         assertEquals(walletId, response.defaultWalletId());
+        assertEquals("raw-refresh", response.refreshToken());
 
         verify(userRepository).save(any(User.class));
         verify(walletService).createWallet(any(CreateWalletRequest.class));
@@ -157,7 +171,9 @@ class AuthServiceTest {
                 .updatedAt(Instant.now())
                 .build();
         when(walletService.getWalletsByUserId(userId.toString())).thenReturn(Collections.singletonList(WalletResponse.from(dummyWallet)));
-        when(jwtTokenProvider.generateToken(userId, "alice")).thenReturn("alice-jwt-token");
+        when(jwtTokenProvider.generateToken(userId, "alice", UserRole.USER)).thenReturn("alice-jwt-token");
+        when(refreshTokenService.issue(userId))
+            .thenReturn(new com.minidigitalwallet.service.RefreshTokenService.IssuedToken("alice-refresh", java.time.Instant.now().plusMillis(604800000L)));
 
         AuthResponse response = authService.login(request);
 
@@ -165,6 +181,8 @@ class AuthServiceTest {
         assertEquals("alice-jwt-token", response.accessToken());
         assertEquals(userId, response.userId());
         assertEquals(walletId, response.defaultWalletId());
+        assertEquals("alice-refresh", response.refreshToken());
+        verify(rateLimiter).reset("alice");
     }
 
     @Test
@@ -182,6 +200,7 @@ class AuthServiceTest {
         when(passwordEncoder.matches("WrongPassword!", "encodedPassword")).thenReturn(false);
 
         assertThrows(InvalidCredentialsException.class, () -> authService.login(request));
+        verify(rateLimiter).recordFailure("alice");
     }
 
     @Test
@@ -191,5 +210,19 @@ class AuthServiceTest {
         when(userRepository.findByUsername("unknown")).thenReturn(Optional.empty());
 
         assertThrows(InvalidCredentialsException.class, () -> authService.login(request));
+        verify(rateLimiter).recordFailure("unknown");
+    }
+
+    @Test
+    @DisplayName("login blocked after too many failures returns 429 without hitting repository")
+    void login_Blocked_Returns429() {
+        LoginRequest request = new LoginRequest("alice", "anyPassword");
+        when(rateLimiter.isBlocked("alice")).thenReturn(true);
+
+        com.minidigitalwallet.exception.AppException ex =
+            assertThrows(com.minidigitalwallet.exception.AppException.class,
+                () -> authService.login(request));
+        assertEquals(org.springframework.http.HttpStatus.TOO_MANY_REQUESTS, ex.getStatus());
+        verify(userRepository, never()).findByUsername(anyString());
     }
 }

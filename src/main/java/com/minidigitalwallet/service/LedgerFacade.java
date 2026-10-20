@@ -69,4 +69,9 @@ public class LedgerFacade {
             originalTransactionId, reversalReferenceId);
         return ledgerService.reverseTransfer(originalTransactionId, reversalReferenceId, description);
     }
+
+    /** Read path for ownership checks (no retry needed). */
+    public LedgerTransaction getTransaction(UUID transactionId) {
+        return ledgerService.getTransaction(transactionId);
+    }
 }

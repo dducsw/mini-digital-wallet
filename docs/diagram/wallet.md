@@ -61,9 +61,11 @@ erDiagram
     wallets {
         UUID id PK "Khóa chính UUIDv4"
         VARCHAR(64) user_id "Định danh người dùng"
+        VARCHAR(12) account_number "STK 12 số duy nhất, đầu 8820"
         VARCHAR(32) wallet_type "USER | SYSTEM"
         VARCHAR(3) currency "Mã tiền tệ ISO-4217 (USD)"
         BIGINT available_balance "Số dư khả dụng (USD Cents)"
+        BIGINT ledger_balance "Số dư kế toán đã ghi nhận"
         VARCHAR(20) status "ACTIVE | FROZEN | CLOSED"
         BIGINT version "Khóa lạc quan OCC"
         TIMESTAMPTZ created_at "Thời điểm tạo"
@@ -88,7 +90,7 @@ erDiagram
    ```
 
 ### Ví Hệ Thống Khởi Tạo Sẵn (Seeded System Accounts)
-Hệ thống seed sẵn 3 ví hệ thống cố định để phục vụ các luồng nạp/rút/phí ở các phase sau:
+Hệ thống seed sẵn 3 ví hệ thống cố định để phục vụ các luồng nạp/rút (đối ứng kế toán kép):
 - `SYS_EXTERNAL_SETTLEMENT` (`00000000-0000-0000-0000-000000000001`): Tài khoản đối ứng cổng thanh toán / ngân hàng ngoài.
 - `SYS_CASH_IN_TRANSIT` (`00000000-0000-0000-0000-000000000002`): Tài khoản trung gian ký quỹ (escrow).
 - `SYS_FEE_REVENUE` (`00000000-0000-0000-0000-000000000003`): Tài khoản thu phí dịch vụ.

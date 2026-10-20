@@ -60,9 +60,25 @@ public record LedgerTransactionResponse(
         Long balanceAfter,
 
         @JsonProperty("created_at")
-        Instant createdAt
+        Instant createdAt,
+
+        @JsonProperty("transaction_id")
+        UUID transactionId,
+
+        @JsonProperty("reference_id")
+        String referenceId,
+
+        @JsonProperty("transaction_type")
+        TransactionType transactionType,
+
+        @JsonProperty("description")
+        String description,
+
+        @JsonProperty("reversal_of_transaction_id")
+        UUID reversalOfTransactionId
     ) {
         public static EntryDto from(LedgerEntry entry) {
+            LedgerTransaction tx = entry.getTransaction();
             return new EntryDto(
                 entry.getId(),
                 entry.getWalletId(),
@@ -70,7 +86,12 @@ public record LedgerTransactionResponse(
                 entry.getAmount(),
                 entry.getLineNo(),
                 entry.getBalanceAfter(),
-                entry.getCreatedAt()
+                entry.getCreatedAt(),
+                tx != null ? tx.getId() : null,
+                tx != null ? tx.getReferenceId() : null,
+                tx != null ? tx.getTransactionType() : null,
+                tx != null ? tx.getDescription() : null,
+                tx != null ? tx.getReversalOfTransactionId() : null
             );
         }
     }

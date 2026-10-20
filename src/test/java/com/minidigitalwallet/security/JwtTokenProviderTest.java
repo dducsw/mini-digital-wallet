@@ -4,6 +4,8 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.DisplayName;
 import org.junit.jupiter.api.Test;
 
+import com.minidigitalwallet.entity.enums.UserRole;
+
 import java.util.UUID;
 
 import static org.junit.jupiter.api.Assertions.*;
@@ -27,12 +29,13 @@ class JwtTokenProviderTest {
         UUID userId = UUID.randomUUID();
         String username = "alice_wonderland";
 
-        String token = jwtTokenProvider.generateToken(userId, username);
+        String token = jwtTokenProvider.generateToken(userId, username, UserRole.ADMIN);
         assertNotNull(token);
         assertTrue(jwtTokenProvider.validateToken(token));
 
         assertEquals(userId, jwtTokenProvider.getUserIdFromToken(token));
         assertEquals(username, jwtTokenProvider.getUsernameFromToken(token));
+        assertEquals(UserRole.ADMIN, jwtTokenProvider.getRoleFromToken(token));
     }
 
     @Test

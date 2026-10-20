@@ -16,7 +16,9 @@ import com.minidigitalwallet.exception.UserNotFoundException;
 import com.minidigitalwallet.repository.UserRepository;
 import com.minidigitalwallet.security.JwtProperties;
 import com.minidigitalwallet.security.JwtTokenProvider;
+import com.minidigitalwallet.security.LoginRateLimiter;
 import com.minidigitalwallet.service.AuthService;
+import com.minidigitalwallet.service.RefreshTokenService;
 import com.minidigitalwallet.service.WalletService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
@@ -39,6 +41,8 @@ public class AuthServiceImpl implements AuthService {
     private final JwtTokenProvider jwtTokenProvider;
     private final JwtProperties jwtProperties;
     private final WalletService walletService;
+    private final LoginRateLimiter rateLimiter;
+    private final RefreshTokenService refreshTokens;
 
     @Override
     @Transactional
@@ -72,23 +76,35 @@ public class AuthServiceImpl implements AuthService {
         );
         WalletResponse defaultWallet = walletService.createWallet(walletRequest);
 
-        String token = jwtTokenProvider.generateToken(savedUser.getId(), savedUser.getUsername());
+        String token = jwtTokenProvider.generateToken(savedUser.getId(), savedUser.getUsername(), savedUser.getRole());
         UserResponse userResponse = UserResponse.from(savedUser);
+        RefreshTokenService.IssuedToken refresh = refreshTokens.issue(savedUser.getId());
 
         log.info("Registered user {} ({}) with default wallet {}", savedUser.getUsername(), savedUser.getId(), defaultWallet.id());
-        return AuthResponse.of(token, jwtProperties.getExpirationMs() / 1000, userResponse, defaultWallet.id());
+        return AuthResponse.of(token, jwtProperties.getExpirationMs() / 1000, userResponse,
+            defaultWallet.id(), refresh.rawToken(), jwtProperties.getRefreshExpirationMs() / 1000);
     }
 
     @Override
-    @Transactional(readOnly = true)
+    @Transactional
     public AuthResponse login(LoginRequest request) {
         String username = request.username().trim();
+        if (rateLimiter.isBlocked(username)) {
+            throw new AppException("Too many failed login attempts, please try again later",
+                HttpStatus.TOO_MANY_REQUESTS, "too-many-requests");
+        }
+
         User user = userRepository.findByUsername(username)
-                .orElseThrow(InvalidCredentialsException::new);
+                .orElseThrow(() -> {
+                    rateLimiter.recordFailure(username);
+                    return new InvalidCredentialsException();
+                });
 
         if (!passwordEncoder.matches(request.password(), user.getPasswordHash())) {
+            rateLimiter.recordFailure(username);
             throw new InvalidCredentialsException();
         }
+        rateLimiter.reset(username);
 
         if (user.getStatus() != UserStatus.ACTIVE) {
             throw new AppException("Account is " + user.getStatus().name().toLowerCase(), HttpStatus.FORBIDDEN, "account-disabled");
@@ -97,11 +113,45 @@ public class AuthServiceImpl implements AuthService {
         List<WalletResponse> wallets = walletService.getWalletsByUserId(user.getId().toString());
         UUID defaultWalletId = wallets.isEmpty() ? null : wallets.get(0).id();
 
-        String token = jwtTokenProvider.generateToken(user.getId(), user.getUsername());
+        String token = jwtTokenProvider.generateToken(user.getId(), user.getUsername(), user.getRole());
         UserResponse userResponse = UserResponse.from(user);
+        RefreshTokenService.IssuedToken refresh = refreshTokens.issue(user.getId());
 
         log.info("User {} ({}) logged in successfully", user.getUsername(), user.getId());
-        return AuthResponse.of(token, jwtProperties.getExpirationMs() / 1000, userResponse, defaultWalletId);
+        return AuthResponse.of(token, jwtProperties.getExpirationMs() / 1000, userResponse,
+            defaultWalletId, refresh.rawToken(), jwtProperties.getRefreshExpirationMs() / 1000);
+    }
+
+    @Override
+    @Transactional
+    public AuthResponse refresh(String rawRefreshToken) {
+        RefreshTokenService.Rotation rotation = refreshTokens.rotate(rawRefreshToken);
+        User user = userRepository.findById(rotation.userId())
+            .orElseThrow(() -> new UserNotFoundException(rotation.userId()));
+        if (user.getStatus() != UserStatus.ACTIVE) {
+            refreshTokens.revokeAll(rotation.userId());
+            throw new AppException("Account is " + user.getStatus().name().toLowerCase(),
+                HttpStatus.FORBIDDEN, "account-disabled");
+        }
+        List<WalletResponse> wallets = walletService.getWalletsByUserId(user.getId().toString());
+        UUID defaultWalletId = wallets.isEmpty() ? null : wallets.get(0).id();
+        String token = jwtTokenProvider.generateToken(user.getId(), user.getUsername(), user.getRole());
+        log.info("Refreshed session for user {} ({})", user.getUsername(), user.getId());
+        return AuthResponse.of(token, jwtProperties.getExpirationMs() / 1000,
+            UserResponse.from(user), defaultWalletId,
+            rotation.fresh().rawToken(), jwtProperties.getRefreshExpirationMs() / 1000);
+    }
+
+    @Override
+    @Transactional
+    public void logout(String rawRefreshToken) {
+        refreshTokens.revoke(rawRefreshToken);
+    }
+
+    @Override
+    @Transactional
+    public void logoutAll(UUID userId) {
+        refreshTokens.revokeAll(userId);
     }
 
     @Override
@@ -110,5 +160,15 @@ public class AuthServiceImpl implements AuthService {
         User user = userRepository.findById(userId)
                 .orElseThrow(() -> new UserNotFoundException(userId));
         return UserResponse.from(user);
+    }
+
+    @Override
+    @Transactional
+    public void setPin(UUID userId, String pin) {
+        User user = userRepository.findById(userId)
+                .orElseThrow(() -> new UserNotFoundException(userId));
+        user.setPinHash(passwordEncoder.encode(pin));
+        userRepository.save(user);
+        log.info("Transaction PIN updated for user {} ({})", user.getUsername(), userId);
     }
 }

@@ -7,6 +7,7 @@ export default function Navbar({
   setShowDropdown,
   onOpenProfile,
   onLogout,
+  onNavigateHome,
 }) {
   const dropdownRef = useRef(null);
   const userInitial = (currentUser?.fullName || currentUser?.username || 'U').charAt(0).toUpperCase();
@@ -24,7 +25,12 @@ export default function Navbar({
   return (
     <header className="top-navbar">
       <div className="nav-inner">
-        <div className="brand-wrapper">
+        <div
+          className="brand-wrapper"
+          style={{ cursor: 'pointer' }}
+          onClick={onNavigateHome}
+          title="Back to dashboard"
+        >
           <div className="brand-text-single">Mini Digital Wallet</div>
         </div>
 

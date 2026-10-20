@@ -15,9 +15,17 @@ public interface TransferService {
 
     TransferResponse topUp(TopUpRequest request, String idempotencyKey);
 
-    TransferResponse withdraw(WithdrawRequest request, String idempotencyKey);
+    TransferResponse withdraw(WithdrawRequest request, String idempotencyKey, String pin);
 
-    TransferResponse transfer(TransferRequest request, String idempotencyKey);
+    default TransferResponse withdraw(WithdrawRequest request, String idempotencyKey) {
+        return withdraw(request, idempotencyKey, null);
+    }
+
+    TransferResponse transfer(TransferRequest request, String idempotencyKey, String pin);
+
+    default TransferResponse transfer(TransferRequest request, String idempotencyKey) {
+        return transfer(request, idempotencyKey, null);
+    }
 
     TransferResponse reverse(UUID originalTransactionId, String idempotencyKey, String description);
 }

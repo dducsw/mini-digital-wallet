@@ -5,9 +5,9 @@ export default function LinkCardModal({ onClose, onLinkCard }) {
   const [cardForm, setCardForm] = useState({
     method_type: 'DEBIT_CARD',
     provider: 'VISA',
-    card_number: '4242424242424242',
-    holder_name: 'ALICE TRAN',
-    is_default: true,
+    card_number: '',
+    holder_name: '',
+    is_default: false,
   });
 
   const handleSubmit = (e) => {

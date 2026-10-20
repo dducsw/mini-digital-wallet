@@ -1,5 +1,6 @@
 package com.minidigitalwallet.entity;
 
+import com.minidigitalwallet.entity.enums.UserRole;
 import com.minidigitalwallet.entity.enums.UserStatus;
 import jakarta.persistence.*;
 import lombok.*;
@@ -30,6 +31,9 @@ public class User {
     @Column(name = "password_hash", nullable = false)
     private String passwordHash;
 
+    @Column(name = "pin_hash")
+    private String pinHash;
+
     @Column(name = "full_name", length = 100)
     private String fullName;
 
@@ -37,6 +41,11 @@ public class User {
     @Column(name = "status", nullable = false, length = 20)
     @Builder.Default
     private UserStatus status = UserStatus.ACTIVE;
+
+    @Enumerated(EnumType.STRING)
+    @Column(name = "role", nullable = false, length = 20)
+    @Builder.Default
+    private UserRole role = UserRole.USER;
 
     @Column(name = "created_at", nullable = false, updatable = false)
     private Instant createdAt;
@@ -51,6 +60,9 @@ public class User {
         this.updatedAt = now;
         if (this.status == null) {
             this.status = UserStatus.ACTIVE;
+        }
+        if (this.role == null) {
+            this.role = UserRole.USER;
         }
     }
 

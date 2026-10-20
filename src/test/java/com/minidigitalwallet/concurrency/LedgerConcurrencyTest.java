@@ -4,6 +4,7 @@ import com.minidigitalwallet.entity.Wallet;
 import com.minidigitalwallet.entity.enums.TransactionType;
 import com.minidigitalwallet.entity.enums.WalletStatus;
 import com.minidigitalwallet.entity.enums.WalletType;
+import com.minidigitalwallet.exception.AppException;
 import com.minidigitalwallet.exception.InsufficientFundsException;
 import com.minidigitalwallet.repository.LedgerEntryRepository;
 import com.minidigitalwallet.repository.LedgerTransactionRepository;
@@ -20,6 +21,8 @@ import org.testcontainers.containers.PostgreSQLContainer;
 import org.testcontainers.junit.jupiter.Container;
 import org.testcontainers.junit.jupiter.Testcontainers;
 
+import java.time.Instant;
+import java.time.temporal.ChronoUnit;
 import java.util.UUID;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.ExecutorService;
@@ -47,6 +50,8 @@ class LedgerConcurrencyTest {
         registry.add("spring.datasource.driver-class-name", () -> "org.postgresql.Driver");
         registry.add("spring.jpa.hibernate.ddl-auto", () -> "create-drop");
         registry.add("spring.flyway.enabled", () -> "false");
+        // Low daily debit cap so the guard test can prove the limit holds under concurrency.
+        registry.add("app.limits.daily-max-amount", () -> "100000");
     }
 
     @Autowired
@@ -218,5 +223,64 @@ class LedgerConcurrencyTest {
         Wallet updatedSmall = walletRepository.findById(smallWallet.getId()).orElseThrow();
         assertThat(updatedSmall.getAvailableBalance()).isEqualTo(1000L); // 5000 - 4000 = 1000 cents
         assertThat(updatedSmall.getAvailableBalance()).isGreaterThanOrEqualTo(0L);
+    }
+
+    @Test
+    @DisplayName("Daily debit cap is evaluated inside the wallet lock: concurrent debits cannot bypass it")
+    void concurrentDebits_DailyCapIsNotBypassed() throws InterruptedException {
+        // Plenty of funds, but the cap configured above is 100,000 cents.
+        Wallet limited = walletRepository.save(Wallet.builder()
+            .userId("USER_DAILY_CAPPED")
+            .walletType(WalletType.USER)
+            .currency("USD")
+            .availableBalance(1_000_000L)
+            .ledgerBalance(1_000_000L)
+            .status(WalletStatus.ACTIVE)
+            .build());
+
+        int threadCount = 20;
+        long attemptAmount = 20_000L;   // 20 concurrent attempts of 20,000 = 400,000 requested
+        long dailyCap = 100_000L;       // exactly 5 of them fit
+
+        ExecutorService executor = Executors.newFixedThreadPool(threadCount);
+        CountDownLatch startLatch = new CountDownLatch(1);
+        CountDownLatch doneLatch = new CountDownLatch(threadCount);
+        AtomicInteger successCount = new AtomicInteger(0);
+        AtomicInteger cappedCount = new AtomicInteger(0);
+
+        for (int i = 0; i < threadCount; i++) {
+            final int index = i;
+            executor.submit(() -> {
+                try {
+                    startLatch.await();
+                    ledgerFacade.executeTransferWithRetry(
+                        "DAILY-CAP-" + index + "-" + UUID.randomUUID(),
+                        limited.getId(),
+                        walletB.getId(),
+                        attemptAmount,
+                        TransactionType.P2P_TRANSFER,
+                        "Daily cap probe"
+                    );
+                    successCount.incrementAndGet();
+                } catch (AppException e) {
+                    cappedCount.incrementAndGet();
+                } catch (Exception ignored) {
+                } finally {
+                    doneLatch.countDown();
+                }
+            });
+        }
+
+        startLatch.countDown();
+        doneLatch.await(30, TimeUnit.SECONDS);
+        executor.shutdown();
+
+        assertThat(successCount.get()).isEqualTo(5);
+        assertThat(cappedCount.get()).isEqualTo(15);
+
+        // The journal itself proves no more than the cap ever left the wallet today.
+        long debitedToday = entryRepository.sumDebitsSince(
+            limited.getId(), Instant.now().truncatedTo(ChronoUnit.DAYS));
+        assertThat(debitedToday).isEqualTo(dailyCap);
     }
 }

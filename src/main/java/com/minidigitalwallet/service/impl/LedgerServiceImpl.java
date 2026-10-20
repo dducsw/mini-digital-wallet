@@ -8,19 +8,32 @@ import com.minidigitalwallet.entity.enums.TransactionType;
 import com.minidigitalwallet.exception.AppException;
 import com.minidigitalwallet.exception.DuplicateRequestException;
 import com.minidigitalwallet.exception.WalletNotFoundException;
+import com.minidigitalwallet.repository.LedgerEntryRepository;
 import com.minidigitalwallet.repository.LedgerTransactionRepository;
 import com.minidigitalwallet.repository.WalletRepository;
+import com.minidigitalwallet.service.LedgerGuard;
 import com.minidigitalwallet.service.LedgerService;
 import lombok.RequiredArgsConstructor;
 import lombok.extern.slf4j.Slf4j;
 import org.springframework.dao.DataIntegrityViolationException;
+import org.springframework.data.domain.Page;
+import org.springframework.data.domain.Pageable;
+import org.springframework.data.domain.Sort;
+import org.springframework.data.jpa.domain.Specification;
 import org.springframework.http.HttpStatus;
 import org.springframework.stereotype.Service;
 import org.springframework.transaction.annotation.Isolation;
 import org.springframework.transaction.annotation.Transactional;
 
+import jakarta.persistence.criteria.Predicate;
+import java.io.IOException;
+import java.io.Writer;
+import java.time.Instant;
+import java.util.ArrayList;
+import java.util.List;
 import java.util.Objects;
 import java.util.UUID;
+import com.minidigitalwallet.dto.response.LedgerTransactionResponse;
 
 @Service
 @RequiredArgsConstructor
@@ -29,6 +42,8 @@ public class LedgerServiceImpl implements LedgerService {
 
     private final WalletRepository walletRepository;
     private final LedgerTransactionRepository transactionRepository;
+    private final LedgerEntryRepository entryRepository;
+    private final List<LedgerGuard> guards;
 
     @Override
     @Transactional(isolation = Isolation.READ_COMMITTED)
@@ -61,6 +76,7 @@ public class LedgerServiceImpl implements LedgerService {
 
         Wallets locked = lockBothWallets(sourceWalletId, destinationWalletId);
         validateSameCurrency(locked.source(), locked.destination());
+        applyGuards(locked.source(), transactionType, amount);
 
         com.minidigitalwallet.domain.model.Money transferMoney = com.minidigitalwallet.domain.model.Money.of(amount, locked.source().getCurrency());
         locked.source().debit(transferMoney);
@@ -120,6 +136,16 @@ public class LedgerServiceImpl implements LedgerService {
                 HttpStatus.BAD_REQUEST,
                 "currency-mismatch"
             );
+        }
+    }
+
+    /**
+     * Business policies that must see a consistent state run here, while the
+     * source wallet lock is still held (see LedgerGuard).
+     */
+    private void applyGuards(Wallet debited, TransactionType type, Long amount) {
+        for (LedgerGuard guard : guards) {
+            guard.check(debited, type, amount);
         }
     }
 
@@ -232,5 +258,85 @@ public class LedgerServiceImpl implements LedgerService {
     public LedgerTransaction getTransactionByReferenceId(String referenceId) {
         return transactionRepository.findByReferenceId(referenceId)
             .orElseThrow(() -> new AppException("Transaction not found for ref: " + referenceId, HttpStatus.NOT_FOUND, "transaction-not-found"));
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public java.util.List<LedgerEntry> getEntriesByWallet(UUID walletId) {
+        return entryRepository.findByWalletIdOrderByCreatedAtDesc(walletId);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public java.util.List<LedgerTransactionResponse.EntryDto> getEntryDtosByWallet(UUID walletId) {
+        return entryRepository.findByWalletIdOrderByCreatedAtDesc(walletId).stream()
+            .map(LedgerTransactionResponse.EntryDto::from)
+            .toList();
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public Page<LedgerTransactionResponse.EntryDto> getStatement(
+        UUID walletId,
+        EntryType type,
+        Instant from,
+        Instant to,
+        Pageable pageable
+    ) {
+        Specification<LedgerEntry> spec = buildStatementSpec(walletId, type, from, to);
+        return entryRepository.findAll(spec, pageable)
+            .map(LedgerTransactionResponse.EntryDto::from);
+    }
+
+    @Override
+    @Transactional(readOnly = true)
+    public void exportStatementCsv(
+        UUID walletId,
+        EntryType type,
+        Instant from,
+        Instant to,
+        Writer writer
+    ) throws IOException {
+        writer.write("entry_id,transaction_id,wallet_id,entry_type,amount,balance_after,created_at\n");
+        int page = 0;
+        while (true) {
+            Page<LedgerEntry> chunk = entryRepository.findAll(
+                buildStatementSpec(walletId, type, from, to),
+                org.springframework.data.domain.PageRequest.of(page, 1000, Sort.by(Sort.Direction.DESC, "createdAt")));
+            for (LedgerEntry e : chunk.getContent()) {
+                UUID txId = e.getTransaction() != null ? e.getTransaction().getId() : null;
+                writer.write(String.format("%s,%s,%s,%s,%d,%d,%s\n",
+                    e.getId(),
+                    txId != null ? txId : "",
+                    e.getWalletId(),
+                    e.getEntryType(),
+                    e.getAmount(),
+                    e.getBalanceAfter(),
+                    e.getCreatedAt()
+                ));
+            }
+            writer.flush();
+            if (!chunk.hasNext()) {
+                break;
+            }
+            page++;
+        }
+    }
+
+    private Specification<LedgerEntry> buildStatementSpec(UUID walletId, EntryType type, Instant from, Instant to) {
+        return (root, query, cb) -> {
+            List<Predicate> predicates = new ArrayList<>();
+            predicates.add(cb.equal(root.get("walletId"), walletId));
+            if (type != null) {
+                predicates.add(cb.equal(root.get("entryType"), type));
+            }
+            if (from != null) {
+                predicates.add(cb.greaterThanOrEqualTo(root.get("createdAt"), from));
+            }
+            if (to != null) {
+                predicates.add(cb.lessThanOrEqualTo(root.get("createdAt"), to));
+            }
+            return cb.and(predicates.toArray(new Predicate[0]));
+        };
     }
 }
