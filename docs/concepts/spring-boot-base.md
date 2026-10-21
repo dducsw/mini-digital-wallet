@@ -12,7 +12,8 @@ Tài liệu tổng hợp những khái niệm lập trình và kiến trúc cố
 5. [Kiểm Tra Dữ Liệu Đầu Vào (Fail-Fast) & Chuẩn Hóa Lỗi RFC 7807](#5-kiểm-tra-dữ-liệu-đầu-vào-fail-fast--chuẩn-hóa-lỗi-rfc-7807)
 6. [Vì Sao `@Retryable` Phải Tách Riêng Khỏi `@Transactional`?](#6-vì-sao-retryable-phải-tách-riêng-khỏi-transactional)
 7. [Sắp Xếp Thứ Tự Khóa Để Triệt Tiêu Deadlock (Deterministic Lock Ordering)](#7-sắp-xếp-thứ-tự-khóa-để-triệt-tiêu-deadlock-deterministic-lock-ordering)
-8. [Tài Liệu Tham Khảo (References & Citations)](#8-tài-liệu-tham-khảo-references--citations)
+8. [Strategy Pattern & Spring Map Injection (Open/Closed Principle)](#8-strategy-pattern--spring-map-injection-openclosed-principle)
+9. [Tài Liệu Tham Khảo (References & Citations)](#9-tài-liệu-tham-khảo-references--citations)
 
 ---
 
@@ -283,7 +284,82 @@ flowchart TD
 
 ---
 
-## 8. Tài Liệu Tham Khảo (References & Citations)
+## 8. Strategy Pattern & Spring Map Injection (Open/Closed Principle)
+
+### Câu chuyện ngoài đời
+Trong một siêu thị, mỗi khách hàng có một cách tính ưu đãi khác nhau: khách vãng lai không giảm giá, khách thành viên giảm 10%, khách VIP giảm 20%. Nếu thu ngân phải nhớ một danh sách dài các lệnh `if-else`, họ rất dễ tính nhầm tiền. Mỗi khi siêu thị ra mắt thêm chính sách khách hàng thân thiết mới, họ lại phải đi tập huấn lại toàn bộ nhân viên.
+
+Trong lập trình cũng vậy: nếu tính phí giao dịch bằng một chuỗi `if-else` hoặc `switch-case` khổng lồ, mỗi lần thêm chính sách phí mới, lập trình viên buộc phải vào sửa code cũ, rất dễ gây lỗi hồi quy (regression bug) cho các tính năng đang chạy ổn định.
+
+### Bản chất kỹ thuật & Mẫu thiết kế
+**Strategy Pattern** giải quyết triệt để bài toán này bằng cách đóng gói các thuật toán tính toán khác nhau vào các class riêng biệt cùng cài đặt chung một Interface:
+
+```mermaid
+classDiagram
+    class FeeStrategy {
+        <<interface>>
+        +calculateFee(amount: long) long
+    }
+    class ZeroFeeStrategy {
+        +calculateFee(amount: long) long
+    }
+    class FlatFeeStrategy {
+        +calculateFee(amount: long) long
+    }
+    class PercentageFeeStrategy {
+        +calculateFee(amount: long) long
+    }
+    class TieredFeeStrategy {
+        +calculateFee(amount: long) long
+    }
+    class FeeEngine {
+        -Map~String, FeeStrategy~ strategies
+        +calculateFee(strategyName: String, amount: long) long
+    }
+
+    FeeStrategy <|.. ZeroFeeStrategy
+    FeeStrategy <|.. FlatFeeStrategy
+    FeeStrategy <|.. PercentageFeeStrategy
+    FeeStrategy <|.. TieredFeeStrategy
+    FeeEngine --> FeeStrategy : Spring Map Injection (Tự động nạp Bean)
+```
+
+### Kỹ thuật Spring Map Injection trong Java 21
+Spring Framework hỗ trợ cơ chế tiêm phụ thuộc dạng Map (`Map<String, FeeStrategy>`) cực kỳ thanh lịch:
+1. Mỗi thuật toán được đánh dấu bằng `@Component("NAME")`:
+   - `@Component("ZERO")`: `ZeroFeeStrategy` (miễn phí).
+   - `@Component("FLAT")`: `FlatFeeStrategy` (cố định 100 cents).
+   - `@Component("PERCENTAGE")`: `PercentageFeeStrategy` (1.5% số tiền).
+   - `@Component("TIERED")`: `TieredFeeStrategy` (bậc thang).
+2. Khi `FeeEngine` khởi tạo, Spring tự động quét toàn bộ container và đưa tất cả các Bean cài đặt `FeeStrategy` vào `Map`:
+   ```java
+   @Service
+   public class FeeEngine {
+       private final Map<String, FeeStrategy> strategies;
+
+       public FeeEngine(Map<String, FeeStrategy> injectedStrategies) {
+           // Tự động nạp toàn bộ Strategies theo Bean Name viết hoa
+           injectedStrategies.forEach((name, strategy) ->
+               this.strategies.put(name.toUpperCase(Locale.ROOT), strategy)
+           );
+       }
+
+       public long calculateFee(String strategyName, long amount) {
+           FeeStrategy strategy = strategies.getOrDefault(strategyName, strategies.get("ZERO"));
+           return strategy.calculateFee(amount);
+       }
+   }
+   ```
+3. Khi ra mắt chính sách phí mới, lập trình viên chỉ cần **tạo thêm 1 class mới** có `@Component`. Toàn bộ code của `FeeEngine` và các service chuyển tiền khác **không cần sửa đổi dù chỉ 1 ký tự**.
+
+> **[Hành Động]**: Áp dụng Strategy Pattern kết hợp Spring Map Injection cho module `FeeEngine`.  
+> **[Lý Thuyết]**: Open/Closed Principle (OCP - Chữ O trong SOLID) & Dependency Inversion Principle (DIP).  
+> **[Mẫu Thiết Kế]**: Strategy Pattern (GoF Behavioral Pattern).  
+> **[Thảm Họa Tránh Được]**: Loại bỏ chuỗi `if-else` bốc mùi, triệt tiêu nguy cơ gây lỗi hồi quy cho các luồng thanh toán hiện có khi thay đổi biểu phí.
+
+---
+
+## 9. Tài Liệu Tham Khảo (References & Citations)
 
 1. **IEEE Computer Society.** (2019). *IEEE Standard for Floating-Point Arithmetic (IEEE Std 754-2019)*. IEEE.
    - Tiêu chuẩn định dạng số thực dấu phẩy động nhị phân và nguyên nhân gây sai số làm tròn trong máy tính.

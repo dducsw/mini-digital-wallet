@@ -22,8 +22,15 @@ Tài liệu được biên soạn theo phong cách trực quan, dễ hiểu, gi�
    - [4.9 Danh Bạ Thụ Hưởng (Saved Contacts)](#49-danh-bạ-thụ-hưởng-saved-contacts)
    - [4.10 Sao Kê & Xuất Dữ Liệu CSV Dạng Stream](#410-sao-kê--xuất-dữ-liệu-csv-dạng-stream)
    - [4.11 Đối Soát Hàng Đêm (Nightly Reconciliation)](#411-đối-soát-hàng-đêm-nightly-reconciliation)
+   - [4.12 Động Cơ Tính Phí Giao Dịch (Fee Strategy Engine)](#412-động-cơ-tính-phí-giao-dịch-fee-strategy-engine)
 5. [Các Quy Tắc Tài Chính Bất Biến (Financial Invariants)](#5-các-quy-tắc-tài-chính-bất-biến-financial-invariants)
 6. [Giải Pháp Cho Những Tình Huống Xung Đột Kinh Điển](#6-giải-pháp-cho-những-tình-huống-xung-đột-kinh-điển)
+7. [Khung Nghiệp Vụ Mở Rộng & Đề Xuất Hoàn Thiện (Business Analyst Framework)](#7-khung-nghiệp-vụ-mở-rộng--đề-xuất-hoàn-thiện-business-analyst-framework)
+   - [7.1 Ma Trận Tác Nhân & Phân Quyền (Actor & Role Matrix)](#71-ma-trận-tác-nhân--phân-quyền-actor--role-matrix)
+   - [7.2 Từ Điển Nghiệp Vụ Fintech (Business Glossary)](#72-từ-điển-nghiệp-vụ-fintech-business-glossary)
+   - [7.3 Khung Đặc Tả Use Case Chuẩn BA (Use Case Specifications)](#73-khung-đặc-tả-use-case-chuẩn-ba-use-case-specifications)
+   - [7.4 Cam Kết Chất Lượng Kinh Doanh (Business SLAs & Compliance)](#74-cam-kết-chất-lượng-kinh-doanh-business-slas--compliance)
+   - [7.5 Bảng Chỉ Số Hiệu Suất Vận Hành (Business Metrics & KPIs)](#75-bảng-chỉ-số-hiệu-suất-vận-hành-business-metrics--kpis)
 
 ---
 
@@ -240,6 +247,19 @@ sequenceDiagram
 
 ---
 
+### 4.12 Động Cơ Tính Phí Giao Dịch (Fee Strategy Engine)
+- **Mục tiêu**: Cho phép hệ thống linh hoạt thay đổi chính sách thu phí dịch vụ mà không can thiệp sửa đổi luồng giao dịch sổ cái cốt lõi.
+- **Các chính sách phí hỗ trợ (Strategy Pattern)**:
+  1. `ZERO`: Miễn phí hoàn toàn (Mặc định).
+  2. `FLAT`: Thu phí cố định $1.00\text{ USD}$ (100 cents) trên mỗi lệnh chuyển.
+  3. `PERCENTAGE`: Thu phí theo tỷ lệ $1.5\%$ trên giá trị giao dịch (làm tròn lên cent gần nhất).
+  4. `TIERED`: Thu phí bậc thang: Giao dịch $\le \$100.00$ được miễn phí; giao dịch $> \$100.00$ áp dụng phí $50\text{ cents}$.
+- **Hạch toán doanh thu phí sổ kép**:
+  - Khi phát sinh phí, khoản phí được ghi nợ từ ví người gửi (`DEBIT`) và ghi có vào ví doanh thu hệ thống (`CREDIT` ví `SYS_FEE_REVENUE` - ID: `00000000-0000-0000-0000-000000000003`).
+  - Đảm bảo tính cân đối bất biến: Tổng tiền trích nợ người dùng luôn bằng tổng tiền nhận của ví đích cộng với phí chuyển về hệ thống.
+
+---
+
 ## 5. Các Quy Tắc Tài Chính Bất Biến (Financial Invariants)
 
 Bảng tổng hợp 11 quy tắc cốt lõi bảo vệ hệ thống tài chính:
@@ -277,3 +297,74 @@ Bảng tổng hợp 11 quy tắc cốt lõi bảo vệ hệ thống tài chính:
 - **Giải pháp 2 tầng**:
   - **Tầng 1**: Client gửi kèm `Idempotency-Key`. Hệ thống lưu trạng thái vào bảng `idempotency_records`. Nếu request thứ hai đến khi request thứ nhất đang chạy, hệ thống trả về HTTP 409. Nếu request thứ nhất đã chạy xong, hệ thống gửi lại ngay kết quả cũ mà không trừ tiền thêm lần nào.
   - **Tầng 2**: Ràng buộc database `UNIQUE(reference_id)` trên bảng `ledger_transactions` là chốt chặn vật lý cuối cùng ngăn mọi dòng ghi đúp.
+
+---
+
+## 7. Khung Nghiệp Vụ Mở Rộng & Đề Xuất Hoàn Thiện (Business Analyst Framework)
+
+Phần bổ sung hoàn thiện hồ sơ nghiệp vụ ví theo tiêu chuẩn Business Analyst chuyên nghiệp, giúp kết nối liền mạch giữa yêu cầu kinh doanh, trải nghiệm người dùng và hệ thống kỹ thuật.
+
+### 7.1 Ma Trận Tác Nhân & Phân Quyền (Actor & Role Matrix)
+
+| Tác Nhân (Actor) | Phạm Vi Nghiệp Vụ | Thao Tác Cho Phép | Thao Tác Nghiêm Cấm |
+| :--- | :--- | :--- | :--- |
+| **Khách Hàng (End-User)** | Sử dụng dịch vụ thanh toán cá nhân. | Nạp, rút, chuyển P2P, cài PIN, quản lý danh bạ, xem sao kê cá nhân. | Xem số dư người khác, sửa số dư, xóa lịch sử giao dịch. |
+| **Đơn Vị Chấp Nhận (Merchant)** | Tiếp nhận thanh toán hàng hóa/dịch vụ. | Nhận tiền thanh toán qua mã QR/Cổng, yêu cầu quyết toán về ngân hàng. | Tham gia chuyển khoản P2P tiêu dùng cá nhân. |
+| **Vận Hành / CS (Ops Agent)** | Hỗ trợ khiếu nại, tra soát nhầm lẫn. | Tra cứu trạng thái giao dịch, tạo đề xuất Reversal (chờ duyệt). | Không được phép tự ý điều chỉnh số dư, không thấy mã PIN khách. |
+| **Kiểm Soát / Tuân Thủ (Compliance)** | Giám sát gian lận, báo cáo rửa tiền (AML). | Xem toàn bộ báo cáo đối soát, trích xuất dữ liệu kiểm toán. | Chỉ có quyền đọc (Read-Only), không can thiệp luồng giao dịch. |
+| **Quản Trị Viên (System Admin)** | Quản lý tham số hệ thống, lịch vận hành. | Kích hoạt đối soát thủ công, khóa tài khoản vi phạm. | Không được phép tạo giao dịch chuyển tiền trực tiếp từ ví hệ thống. |
+
+---
+
+### 7.2 Từ Điển Nghiệp Vụ Fintech (Business Glossary)
+
+- **Số Dư Khả Dụng (Available Balance)**: Khoản tiền thực tế khách hàng có thể tiêu dùng hoặc rút ngay lập tức (`wallets.available_balance`).
+- **Số Dư Kế Toán (Ledger Balance)**: Số dư đã được chốt sổ hạch toán theo lịch sử toàn bộ bút toán (`wallets.ledger_balance`).
+- **Bù Trừ (Clearing)**: Xác thực nghĩa vụ tài chính và kiểm tra hạn mức/số dư trước khi hạch toán.
+- **Quyết Toán (Settlement)**: Chuyển giao giá trị tài chính thực tế ra bên ngoài thông qua ví đối ứng hệ thống (`SYS_EXTERNAL_SETTLEMENT`).
+- **Giờ Chốt Sổ (Cut-off Time)**: Mốc $00:00:00\text{ UTC}$ reset hạn mức ngày; $02:00:00\text{ UTC}$ chạy tiến trình đối soát tự động.
+- **Hạn Mức Vận Tốc (Velocity Limits)**: Ngưỡng trần giao dịch $10.000\text{ USD}$/lệnh và $50.000\text{ USD}$/ngày để hạn chế rủi ro gian lận.
+- **Giao Dịch Đảo (Reversal)**: Bút toán hoàn nguyên độc lập, liên kết mã giao dịch gốc, không tẩy xóa dữ liệu cũ.
+
+---
+
+### 7.3 Khung Đặc Tả Use Case Chuẩn BA (Use Case Specifications)
+
+Mẫu chuẩn hóa đặc tả luồng nghiệp vụ lấy khách hàng và trải nghiệm thực tế làm trung tâm:
+
+#### Đặc Tả: Chuyển Tiền P2P Nội Bộ (UC-P2P)
+- **Tác nhân chính**: Khách hàng cá nhân (Chủ ví gửi).
+- **Điều kiện tiên quyết**: Ví gửi ở trạng thái `ACTIVE`, đã cài mã PIN 6 số, số dư khả dụng $\ge$ số tiền chuyển.
+- **Luồng chính (Happy Path)**:
+  1. Người gửi nhập số tài khoản đích (12 số) và số tiền cần chuyển.
+  2. Hệ thống kiểm tra số tài khoản đích hợp lệ và hiển thị tên/loại ví đích để người gửi xác nhận.
+  3. Người gửi xác nhận và nhập mã PIN 6 chữ số.
+  4. Hệ thống kiểm tra hạn mức lệnh ($\le \$10.000$) và hạn mức ngày ($\le \$50.000$).
+  5. Hệ thống khóa an toàn hai ví, ghi nợ ví gửi, ghi có ví nhận và tạo 2 dòng bút toán đối xứng.
+  6. Hệ thống gửi thông báo kết quả thành công cho cả hai bên.
+- **Luồng ngoại lệ & Thông báo người dùng**:
+  - *Sai mã PIN*: Tăng biến đếm lỗi; sai liên tiếp 5 lần $\rightarrow$ Khóa tính năng PIN 15 phút, thông báo *"Bạn đã nhập sai PIN 5 lần. Vui lòng thử lại sau 15 phút"*.
+  - *Không đủ số dư*: Từ chối lệnh $\rightarrow$ Thông báo *"Số dư khả dụng không đủ để thực hiện giao dịch"*.
+  - *Ví đích không hoạt động*: Ví đích bị `FROZEN` hoặc `CLOSED` $\rightarrow$ Thông báo *"Tài khoản người nhận hiện không sẵn sàng nhận tiền"*.
+  - *Vượt trần hạn mức ngày*: Tổng tiền chuyển trong ngày vượt $\$50.000$ $\rightarrow$ Thông báo *"Giao dịch vượt quá hạn mức chuyển tiền còn lại trong ngày"*.
+
+---
+
+### 7.4 Cam Kết Chất Lượng Kinh Doanh (Business SLAs & Compliance)
+
+- **Thời Gian Phản Hồi Giao Dịch (Latency SLA)**: Xác nhận giao dịch trong vòng $\le 1.5$ giây ở phân vị 99th percentile.
+- **Độ Khả Dụng Hệ Thống (Availability SLA)**: Đạt $99.95\%$ thời gian hoạt động trong năm.
+- **Cam Kết Toàn Vẹn Tài Chính (Financial Invariance SLA)**: Sai lệch sổ cái tuyệt đối bằng $0\text{ cent}$; $\text{RPO} = 0$ (Zero Data Loss).
+- **Tuân Thủ Bảo Mật & Pháp Lý (Regulatory Compliance)**:
+  - 100% dữ liệu thẻ quốc tế tuân thủ tiêu chuẩn PCI-DSS (không lưu số thẻ thật và mã CVV, mã hóa token).
+  - Lộ trình tích hợp eKYC (xác thực danh tính) và bộ lọc giám sát giao dịch đáng ngờ phục vụ phòng chống rửa tiền (AML).
+
+---
+
+### 7.5 Bảng Chỉ Số Hiệu Suất Vận Hành (Business Metrics & KPIs)
+
+- **TPV (Total Payment Volume)**: Tổng giá trị thanh toán thành công theo ngày, phân rã theo loại giao dịch (Top-up, Withdraw, P2P).
+- **DAW (Daily Active Wallets)**: Số lượng ví phát sinh ít nhất một giao dịch tài chính trong ngày.
+- **TSR (Transaction Success Rate)**: Tỷ lệ giao dịch hoàn tất thành công (mục tiêu $\ge 98.5\%$).
+- **Tỷ Lệ Hoàn Tiền (Reversal Rate)**: Tỷ lệ giao dịch tranh chấp/hoàn tiền trên tổng số lệnh (ngưỡng an toàn $< 0.5\%$).
+

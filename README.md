@@ -26,6 +26,7 @@ Modular monolith backend for a mini digital wallet: identity & users, multi-stat
 - **Transfers & Reversals**: Top-up, withdraw, P2P, and single-use append-only reversals (`UNIQUE` DB lock).
 - **Ownership (BOLA)**: Strict caller-ownership checks across all resources (HTTP 403).
 - **Double-Entry Ledger**: Balanced `DEBIT/CREDIT` pairs in `Long` cents, ordered pessimistic locks, deadlock retry.
+- **Fee Engine (Strategy Pattern)**: Pluggable fee calculation engine using Strategy Pattern and Spring Map Injection (`Map<String, FeeStrategy>`). Supports `ZERO` (free), `FLAT` ($1.00), `PERCENTAGE` (1.5%), and `TIERED` (free <= $100, $0.50 above), extensible without modifying transaction processing (Open/Closed Principle).
 - **Nightly Reconciliation**: Automated 2 AM audit (`balance == sum(CREDIT) - sum(DEBIT)` + global zero-sum) in 2 set-based queries, independent of wallet count.
 - **Idempotency**: Scoped `Idempotency-Key` with SHA-256 payload hash and 30s auto-recovery lease.
 
@@ -40,7 +41,8 @@ com.minidigitalwallet
 ├── controller/  # REST endpoints (Auth, Wallet, Transfer, Ledger, Contact, Reconciliation)
 ├── service/     # WalletService, TransferService, LedgerService/Facade, ContactService,
 │                # TransactionPinValidator, TransactionLimitValidator (LedgerGuard),
-│                # PinRateLimiter, IdempotencyService, CallerProvider, ReconciliationService
+│                # PinRateLimiter, IdempotencyService, CallerProvider, ReconciliationService,
+│                # fee/ (FeeEngine, FeeStrategy, Zero/Flat/Percentage/TieredFeeStrategy)
 ├── domain/      # Money, AccountNumber (12-digit account number), WalletState
 ├── entity/      # JPA entities (User, Wallet, PaymentMethod, LedgerEntry, Contact, ...)
 ├── repository/  # Spring Data JPA repositories
@@ -114,12 +116,13 @@ GET  /api/v1/admin/reconciliation/runs (ROLE_ADMIN only; latest 50 reconciliatio
 ## Documentation
 
 ### Core Business & Architecture
-- **Core Business & Banking**: [docs/BUSINESS.md](docs/BUSINESS.md) — Double-entry bookkeeping, 11 financial invariants, and edge case safety.
+- **Core Business & Banking**: [docs/BUSINESS.md](docs/BUSINESS.md) — Double-entry bookkeeping, 11 financial invariants, Fee Strategy Engine, and Business Analyst framework.
 - **REST API Specification**: [docs/API.md](docs/API.md) — Comprehensive endpoints, conventions, headers, and RFC 7807 error details.
 - **Setup & Quickstart**: [docs/SETUP.md](docs/SETUP.md) — 4-step local startup guide, cURL cheat sheet, and troubleshooting.
 
 ### Computer Science & Financial Engineering Concepts
-- [Technical Foundations](docs/concepts/spring-boot-base.md) — IEEE 754 vs `Long` cents, Java 21 `record`, Hibernate lifecycle, and Deadlock prevention.
+- [PostgreSQL Engineering](docs/concepts/postgres.md) — MVCC tuple internals (`xmin`/`xmax`), physical page layout, B-Tree index scan, deterministic lock ordering, and set-based reconciliation.
+- [Technical Foundations](docs/concepts/spring-boot-base.md) — IEEE 754 vs `Long` cents, Java 21 `record`, Hibernate lifecycle, Deadlock prevention, and Strategy Pattern with Spring Map Injection.
 - [Double-Entry Bookkeeping](docs/concepts/double-entry-bookkeeping.md) — Pacioli (1494), zero-sum conservation, and append-only event streams.
 - [Concurrency & Deadlocks](docs/concepts/concurrency-and-deadlocks.md) — ACID isolation, Coffman's 4 conditions, DAG lock ordering, and Spring AOP proxy.
 - [Two-Tier Idempotency](docs/concepts/two-tier-idempotency.md) — IETF draft standard, distributed leases, and SHA-256 cryptographic request fingerprinting.
@@ -140,7 +143,7 @@ GET  /api/v1/admin/reconciliation/runs (ROLE_ADMIN only; latest 50 reconciliatio
 ## Tests
 
 ```bash
-mvn test   # 100 tests: unit tests (H2/Mockito) + concurrency/integration tests (Testcontainers PostgreSQL 16)
+mvn test   # 106 unit & service tests (H2/Mockito) + concurrency/integration tests (Testcontainers PostgreSQL 16)
 ```
 
 ## Load Test Results (k6)
