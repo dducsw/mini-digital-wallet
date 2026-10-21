@@ -15,20 +15,24 @@ Modular monolith backend for a mini digital wallet: identity & users, multi-stat
 
 ## Features
 
-- **Auth & JWT**: Register, login (rate-limited: 5 fails/15m => HTTP 429), 15-min access token + 7-day rotating refresh token (reuse kills all sessions, `POST /auth/logout` revokes, `POST /auth/logout-all` kills every device). 256-bit HEX HMAC secret. Rate limiters are in-memory single-instance (lost on restart, not shared across replicas — use Redis for multi-replica).
-- **Roles & Authorization**: `USER` (default) and `ADMIN` travel as a JWT claim; `/api/v1/admin/**` requires `ROLE_ADMIN` (403 otherwise). Promote an ops account with `UPDATE users SET role = 'ADMIN' WHERE username = '<ops-user>';` — the change applies on the next login/refresh (at most one 15-min token lifetime).
-- **Transaction PIN**: 6-digit PIN required on debits (`X-Transaction-Pin`), 15m lockout after 5 fails. Users without a PIN must set one first (403 `pin-setup-required`).
-- **Transaction Limits**: Hard caps at $10,000/tx and $50,000/day of cumulative outflow per wallet. The daily check runs inside the ledger transaction while the wallet row lock is held, so concurrent debits cannot race past it; reversals (refunds) and internal SYSTEM accounts are exempt.
-- **Saved Contacts**: 12-digit recipient directory with nicknames and favorites for quick P2P.
-- **Statements & CSV**: Filter by type/date, pagination, and paged CSV export (1000 rows/page, flushed per page — no full in-memory load).
-- **Wallets**: 12-digit account numbers, real-time balance, status state machine (`ACTIVE / FROZEN / CLOSED`).
-- **Payment Methods**: PCI-DSS tokenized card linking (masked `**** 4242` only), owner-scoped.
-- **Transfers & Reversals**: Top-up, withdraw, P2P, and single-use append-only reversals (`UNIQUE` DB lock).
-- **Ownership (BOLA)**: Strict caller-ownership checks across all resources (HTTP 403).
-- **Double-Entry Ledger**: Balanced `DEBIT/CREDIT` pairs in `Long` cents, ordered pessimistic locks, deadlock retry.
-- **Fee Engine (Strategy Pattern)**: Pluggable fee calculation engine using Strategy Pattern and Spring Map Injection (`Map<String, FeeStrategy>`). Supports `ZERO` (free), `FLAT` ($1.00), `PERCENTAGE` (1.5%), and `TIERED` (free <= $100, $0.50 above), extensible without modifying transaction processing (Open/Closed Principle).
-- **Nightly Reconciliation**: Automated 2 AM audit (`balance == sum(CREDIT) - sum(DEBIT)` + global zero-sum) in 2 set-based queries, independent of wallet count.
-- **Idempotency**: Scoped `Idempotency-Key` with SHA-256 payload hash and 30s auto-recovery lease.
+### Core Banking & Financial Safety
+- **Double-Entry Bookkeeping**: Balanced `DEBIT/CREDIT` pairs in `Long` cents; strictly append-only audit trail.
+- **Pessimistic Concurrency & Anti-Deadlock**: Lexicographical `min/max` lock ordering with row-level locks (`SELECT FOR UPDATE`).
+- **Two-Tier Idempotency**: Fast-fail memory lease + physical PostgreSQL `UNIQUE` constraints with SHA-256 payload hashing.
+- **Nightly Reconciliation**: Automated 2 AM set-based audit verifying per-wallet balances and global zero-sum integrity.
+- **Fee Engine (Strategy Pattern)**: Pluggable policies (`ZERO`, `FLAT`, `PERCENTAGE`, `TIERED`) via Spring Map Injection (Open/Closed Principle).
+
+### Wallet & Transfers
+- **Wallet Lifecycle**: State machine (`ACTIVE`, `FROZEN`, `CLOSED`) with 12-digit human-friendly account numbers.
+- **Core Operations**: Top-up from card, withdrawal, instant P2P transfer, and single-use non-destructive reversals.
+- **Transaction Limits**: Velocity caps ($10k/tx, $50k/day) validated under row locks to eliminate TOCTOU race conditions.
+- **Saved Contacts & Statements**: Beneficiary directory with favorites; streaming CSV statement export with $O(1)$ memory overhead.
+
+### Identity & Security
+- **Authentication & Sessions**: 15-min JWT access token + rotating 7-day refresh token with automatic token-reuse detection.
+- **Transaction PIN**: 6-digit BCrypt-hashed PIN required on all debits; 15-min lockout after 5 consecutive failed attempts.
+- **RBAC & Authorization**: Strict `USER` and `ADMIN` roles protecting management, settlement, and reconciliation endpoints.
+- **Zero BOLA & PCI-DSS Safety**: Strict caller-ownership checks on all resources; card details tokenized and masked (`**** 4242`).
 
 ## Tech Stack
 
