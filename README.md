@@ -119,6 +119,11 @@ GET  /api/v1/admin/reconciliation/runs (ROLE_ADMIN only; latest 50 reconciliatio
 
 ## Documentation
 
+### Product Management & PO Portfolio
+- **Product Requirement Document (PRD)**: [docs/product/PRD.md](docs/product/PRD.md) — Problem statement, user personas, scope, and North Star metrics.
+- **User Stories & Acceptance Criteria**: [docs/product/USER_STORIES.md](docs/product/USER_STORIES.md) — Gherkin scenarios (Given-When-Then), happy paths, and risk edge cases.
+- **Ops & Dispute Playbook**: [docs/product/OPS_PLAYBOOK.md](docs/product/OPS_PLAYBOOK.md) — Reversal SOP, 4-eye policy (Maker-Checker), and incident SLAs.
+
 ### Core Business & Architecture
 - **Core Business & Banking**: [docs/BUSINESS.md](docs/BUSINESS.md) — Double-entry bookkeeping, 11 financial invariants, Fee Strategy Engine, and Business Analyst framework.
 - **REST API Specification**: [docs/API.md](docs/API.md) — Comprehensive endpoints, conventions, headers, and RFC 7807 error details.
